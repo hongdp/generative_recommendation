@@ -83,3 +83,9 @@ To ensure systematic progress, adhere to the following protocol when executing t
   - **Perplexity (PPL)**: The standard NLP test set PPL (e.g., on WikiText-103).
   - **Throughput & MFU**: Compute tokens/sec/device and MFU percentage to monitor hardware efficiency.
 - **Problem & Fix Recording**: Document any runtime errors (e.g., GCS FUSE descriptor leaks, JAX compatibility crashes) alongside their specific remediation steps.
+
+## 9. Task List Management Protocols
+Adhere to the following guidelines when tracking project items in `tasks.md`:
+- **Order of Execution**: Execute backlog tasks sequentially in the order of their definition to preserve dependencies.
+- **Resource Constraints**: If system constraints (such as GPU memory or disk space) prevent execution, explicitly move and document the task under the "Skipped / Rejected / Insufficient Resources" section with clear reasoning.
+- **Subtask Granularity**: Break down high-level milestone goals (e.g., Task 3) into distinct, trackable sub-items (e.g., Task 3.1, Task 3.2) during planning to improve granularity and progress visibility.
