@@ -95,6 +95,7 @@ def main():
     parser.add_argument("--eval_only", action="store_true", help="Only run test set evaluation using --resume_path.")
     parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs.")
     parser.add_argument("--tb_log_dir", type=str, default="./data/tensorboard/tiger_ml1m", help="TensorBoard log directory.")
+    parser.add_argument("--semantic_ids_path", type=str, default="./data/semantic_ids.json", help="Path to Semantic IDs JSON file.")
     args = parser.parse_args()
 
     print("--- Replicating TIGER Results on MovieLens-1M ---")
@@ -106,9 +107,9 @@ def main():
     print(f"Dataset stats: Users = {loader.num_users}, Items = {loader.num_items}")
 
     # Load Semantic IDs
-    ids_path = os.path.join(data_dir, "semantic_ids.json")
+    ids_path = args.semantic_ids_path
     if not os.path.exists(ids_path):
-        raise FileNotFoundError(f"Semantic IDs not found at {ids_path}. Run train_rqvae.py first.")
+        raise FileNotFoundError(f"Semantic IDs not found at {ids_path}. Generate them first.")
     
     with open(ids_path, "r") as f:
         semantic_ids = {int(k): v for k, v in json.load(f).items()}
@@ -337,6 +338,9 @@ def main():
     num_samples = len(train_tokens_tar)
     epoch_rng = jax.random.PRNGKey(777)
 
+    num_batches = num_samples // batch_size
+    global_step = (start_epoch - 1) * num_batches
+
     print(f"\nTraining TIGER model for {epochs} epochs starting from epoch {start_epoch}...")
     for epoch in range(start_epoch, epochs + 1):
         indices = np.arange(num_samples)
@@ -345,7 +349,7 @@ def main():
         shuffled_tar = train_tokens_tar[indices]
 
         epoch_loss = 0.0
-        num_batches = 0
+        num_batches_processed = 0
         start_time = time.time()
         
         for i in range(0, num_samples, batch_size):
@@ -360,17 +364,21 @@ def main():
                 params, opt_state, jnp.array(batch_in), jnp.array(batch_tar), step_rng
             )
             epoch_loss += loss_val
-            num_batches += 1
+            num_batches_processed += 1
+            global_step += 1
+
+            if writer is not None and global_step % 10 == 0:
+                writer.add_scalar("Loss/train_step", float(loss_val), global_step)
 
         elapsed = time.time() - start_time
-        avg_loss = float(epoch_loss) / num_batches
+        avg_loss = float(epoch_loss) / num_batches_processed
         print(f"Epoch {epoch:02d}/{epochs} | Train Loss: {avg_loss:.4f} | Time: {elapsed:.2f}s")
         
         if writer is not None:
-            writer.add_scalar("Loss/train", avg_loss, epoch)
+            writer.add_scalar("Loss/train_epoch", avg_loss, global_step)
 
-        # Evaluate on validation split every 2 epochs
-        if epoch % 2 == 0:
+        # Evaluate on validation split every epoch
+        if True:
             print(f"Evaluating validation split at epoch {epoch}...")
             val_results = evaluate_tiger(params, val_tokens_in, val_tar, batch_size=512)
             val_ndcg = val_results["NDCG@10"]
@@ -379,9 +387,9 @@ def main():
             print(f"--- Validation @ Epoch {epoch} | NDCG@10: {val_ndcg:.5f} | HR@10: {val_hr:.5f} | MRR: {val_mrr:.5f}")
 
             if writer is not None:
-                writer.add_scalar("Val/NDCG@10", val_ndcg, epoch)
-                writer.add_scalar("Val/HR@10", val_hr, epoch)
-                writer.add_scalar("Val/MRR", val_mrr, epoch)
+                writer.add_scalar("Val/NDCG@10", val_ndcg, global_step)
+                writer.add_scalar("Val/HR@10", val_hr, global_step)
+                writer.add_scalar("Val/MRR", val_mrr, global_step)
 
             if val_ndcg > best_val_ndcg:
                 best_val_ndcg = val_ndcg
@@ -430,7 +438,7 @@ def main():
 
     if writer is not None:
         for metric, score in test_results.items():
-            writer.add_scalar(f"Test/{metric}", score, epochs)
+            writer.add_scalar(f"Test/{metric}", score, global_step)
         writer.close()
         print("TensorBoard writer closed.")
 

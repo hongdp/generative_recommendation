@@ -15,6 +15,9 @@ This document tracks subsequent tasks and their progress.
     - [] **Task 1.2**: Implement and Train TIGER model
     - [] **Task 1.3**: Evaluate TIGER model
 - [] **Task 2**: Implement,train and eval Transformer model on MovieLens-1M that matches the number of parameters of the HSTU model we are using. 
+- [ ] **Task 3**: Implement and evaluate RQ-KMeans semantic ID generator and run comparative TIGER experiments.
+    - [x] **Task 3.1**: Implement RQ-KMeans semantic ID generator.
+    - [ ] **Task 3.2**: Train and evaluate TIGER model with K-Means Semantic IDs.
 
 ## Skipped / Rejected / Insufficient Resources
 

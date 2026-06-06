@@ -14,13 +14,60 @@ from evaluation.evaluator import Evaluator
 from models.hstu import HSTUModel
 
 
+def create_model(model_name: str, num_items: int, max_len: int, args):
+    if model_name.lower() == "hstu":
+        return HSTUModel(
+            num_items=num_items,
+            embedding_dim=args.embedding_dim,
+            num_blocks=args.num_blocks,
+            num_heads=args.num_heads,
+            attention_dim=args.attention_dim,
+            linear_dim=args.linear_dim,
+            max_sequence_len=max_len,
+            attn_dropout_rate=args.dropout_rate,
+            linear_dropout_rate=args.dropout_rate,
+        )
+    elif model_name.lower() == "transformer":
+        try:
+            from models.transformer import TransformerModel
+            return TransformerModel(
+                num_items=num_items,
+                embedding_dim=args.embedding_dim,
+                num_blocks=args.num_blocks,
+                num_heads=args.num_heads,
+                attention_dim=args.attention_dim,
+                linear_dim=args.linear_dim,
+                max_sequence_len=max_len,
+                attn_dropout_rate=args.dropout_rate,
+                linear_dropout_rate=args.dropout_rate,
+            )
+        except ImportError:
+            raise NotImplementedError(
+                f"Model architecture '{model_name}' is not implemented yet. "
+                "Please implement TransformerModel under src/models/transformer.py first."
+            )
+    else:
+        raise ValueError(f"Unknown model architecture: {model_name}")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="HSTU training and evaluation on MovieLens-1M.")
+    parser = argparse.ArgumentParser(description="Pluggable sequential model training and evaluation on MovieLens-1M.")
+    parser.add_argument("--model", type=str, default="hstu", choices=["hstu", "transformer"], help="Model architecture.")
     parser.add_argument("--checkpoint_dir", type=str, default="./data/checkpoints", help="Directory to save checkpoints.")
     parser.add_argument("--resume_path", type=str, default="", help="Path to checkpoint to resume training or evaluate.")
     parser.add_argument("--eval_only", action="store_true", help="Only run test set evaluation using --resume_path.")
     parser.add_argument("--epochs", type=int, default=40, help="Number of training epochs.")
     parser.add_argument("--tb_log_dir", type=str, default="./data/tensorboard/hstu_ml1m", help="TensorBoard log directory.")
+    parser.add_argument("--embedding_dim", type=int, default=256, help="Embedding dimension.")
+    parser.add_argument("--num_blocks", type=int, default=4, help="Number of model blocks.")
+    parser.add_argument("--num_heads", type=int, default=4, help="Number of attention heads.")
+    parser.add_argument("--attention_dim", type=int, default=128, help="Attention projection dimension.")
+    parser.add_argument("--linear_dim", type=int, default=512, help="Linear layer projection dimension.")
+    parser.add_argument("--dropout_rate", type=float, default=0.2, help="Dropout rate for attention and feed-forward layers.")
+    parser.add_argument("--max_len", type=int, default=50, help="Maximum sequence length.")
+    parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate.")
+    parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay rate.")
+    parser.add_argument("--batch_size", type=int, default=512, help="Batch size for training.")
     args = parser.parse_args()
 
     writer = None
@@ -29,7 +76,7 @@ def main():
         writer = SummaryWriter(log_dir=args.tb_log_dir)
         print(f"TensorBoard logging enabled. Logs saved to {args.tb_log_dir}")
 
-    print("--- Replicating HSTU Results on MovieLens-1M ---")
+    print(f"--- Replicating {args.model.upper()} Results on MovieLens-1M ---")
     print("Device list:", jax.devices())
 
     # 1. Initialize data loader (downloads and parses ML-1M)
@@ -39,7 +86,7 @@ def main():
     print(f"Dataset stats: Users = {loader.num_users}, Items = {loader.num_items}")
 
     # 2. Get chronological splits
-    max_len = 50
+    max_len = args.max_len
     print(f"Generating train, validation, and test splits (max_len={max_len})...")
     
     train_dataset = loader.get_split("train", max_len=max_len, format_type="index")
@@ -54,19 +101,9 @@ def main():
     test_inputs, test_targets = test_dataset.to_numpy()
     print(f"Test split: {len(test_targets)} samples")
 
-    # 3. Instantiate HSTU Model with full paper-like configurations
-    print("Initializing full HSTU Model...")
-    model = HSTUModel(
-        num_items=loader.num_items,
-        embedding_dim=256,
-        num_blocks=4,
-        num_heads=4,
-        attention_dim=128,
-        linear_dim=512,
-        max_sequence_len=max_len,
-        attn_dropout_rate=0.2,
-        linear_dropout_rate=0.2,
-    )
+    # 3. Instantiate pluggable Model with parsed configurations
+    print(f"Initializing full {args.model.upper()} Model...")
+    model = create_model(args.model, loader.num_items, max_len, args)
 
     # Initialize variables
     key = jax.random.PRNGKey(42)
@@ -75,9 +112,7 @@ def main():
     params = variables["params"]
 
     # 4. Set up Optimizer (AdamW with weight decay)
-    learning_rate = 1e-3
-    weight_decay = 1e-4
-    optimizer = optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+    optimizer = optax.adamw(learning_rate=args.learning_rate, weight_decay=args.weight_decay)
     opt_state = optimizer.init(params)
 
     # 5. Define JIT training and evaluation functions
@@ -109,11 +144,11 @@ def main():
 
     # 6. Training loop with early stopping
     epochs = args.epochs
-    batch_size = 512
+    batch_size = args.batch_size
     num_samples = len(train_targets)
     best_val_ndcg = -1.0
     best_params = None
-    patience = 5  # Stop if validation NDCG doesn't improve for 5 checks (10 epochs)
+    patience = 5  # Stop if validation NDCG doesn't improve for 5 checks
     patience_counter = 0
 
     evaluator = Evaluator(k_list=[1, 5, 10])
@@ -144,14 +179,14 @@ def main():
             return predict_batch(best_params, batch_inputs)
         print("\nRunning test evaluation only...")
         test_results = evaluator.evaluate_index_based(
-            test_predict, test_inputs, test_targets, batch_size=512
+            test_predict, test_inputs, test_targets, batch_size=batch_size
         )
         print("\n--- Test Evaluation Results ---")
         for metric, score in test_results.items():
             print(f"{metric}: {score:.5f}")
         return
 
-    print(f"\nTraining full HSTU model for {epochs} epochs (batch_size={batch_size}), starting from epoch {start_epoch}...")
+    print(f"\nTraining full {args.model.upper()} model for {epochs} epochs (batch_size={batch_size}), starting from epoch {start_epoch}...")
     epoch_rng = jax.random.PRNGKey(777)
 
     for epoch in range(start_epoch, epochs + 1):
@@ -187,13 +222,13 @@ def main():
         if writer is not None:
             writer.add_scalar("Loss/train", avg_loss, epoch)
 
-        # Evaluate on validation set every 2 epochs
-        if epoch % 2 == 0:
+        # Evaluate on validation set every epoch
+        if True:
             def val_predict(batch_inputs):
                 return predict_batch(params, batch_inputs)
                 
             val_results = evaluator.evaluate_index_based(
-                val_predict, val_inputs, val_targets, batch_size=512
+                val_predict, val_inputs, val_targets, batch_size=batch_size
             )
             val_ndcg = val_results["NDCG@10"]
             val_hr = val_results["HR@10"]
@@ -249,7 +284,7 @@ def main():
 
     print("\nRunning final test evaluation...")
     test_results = evaluator.evaluate_index_based(
-        test_predict, test_inputs, test_targets, batch_size=512
+        test_predict, test_inputs, test_targets, batch_size=batch_size
     )
 
     print("\n--- Final Test Evaluation Results ---")
@@ -259,7 +294,7 @@ def main():
     # 8. Document results in experiment_results.md
     log_path = "experiment_results.md"
     results_row = (
-        f"| 2026-06-06 | Full HSTUModel (4 blocks, embed=256) on ML-1M | Local (GeForce RTX 4080) | "
+        f"| 2026-06-06 | Full {args.model.upper()} (blocks={args.num_blocks}, embed={args.embedding_dim}) on ML-1M | Local (GeForce RTX 4080) | "
         f"Best Val NDCG@10={best_val_ndcg:.5f}; "
         f"Test: HR@1={test_results['HR@1']:.5f}, HR@5={test_results['HR@5']:.5f}, HR@10={test_results['HR@10']:.5f}, "
         f"NDCG@5={test_results['NDCG@5']:.5f}, NDCG@10={test_results['NDCG@10']:.5f}, MRR={test_results['MRR']:.5f} | "
