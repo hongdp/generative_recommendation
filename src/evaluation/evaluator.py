@@ -7,7 +7,7 @@ from typing import Callable, Dict, List, Sequence, Union
 import numpy as np
 import jax.numpy as jnp
 
-from generative_recommendation.evaluation.metrics import (
+from evaluation.metrics import (
     compute_ranks,
     compute_text_ranks,
     hit_rate_at_k,

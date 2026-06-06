@@ -1,6 +1,6 @@
 import numpy as np
 import jax.numpy as jnp
-from generative_recommendation.evaluation.metrics import (
+from evaluation.metrics import (
     compute_ranks,
     hit_rate_at_k,
     ndcg_at_k,

@@ -1,9 +1,9 @@
 from unittest.mock import patch
 import numpy as np
 
-from generative_recommendation.datasets.base import pad_or_truncate, build_sequence_data
-from generative_recommendation.datasets.movielens import MovieLensDataLoader
-from generative_recommendation.datasets.amazon import AmazonDataLoader
+from datasets.base import pad_or_truncate, build_sequence_data
+from datasets.movielens import MovieLensDataLoader
+from datasets.amazon import AmazonDataLoader
 
 
 def test_pad_or_truncate():
@@ -53,8 +53,8 @@ def test_build_sequence_data():
     # For user 2 ([10, 30]):
     # - no prefixes because length is 2, range(1, 1) is empty.
     inputs_train, targets_train = build_sequence_data(user_history, max_len=3, split="train", pad_val=0)
-    assert inputs_train == [[0, 0, 10], [0, 10, 20]]
-    assert targets_train == [20, 30]
+    assert inputs_train == [[0, 0, 10]]
+    assert targets_train == [20]
 
 
 # Mock return data for MovieLens
@@ -68,8 +68,8 @@ mock_ml_interactions = [
 mock_ml_titles = {101: "Toy Story", 102: "Jumanji", 103: "Grumpier Old Men"}
 
 
-@patch("generative_recommendation.datasets.movielens.download_and_extract_movielens")
-@patch("generative_recommendation.datasets.movielens.parse_movielens_data")
+@patch("datasets.movielens.download_and_extract_movielens")
+@patch("datasets.movielens.parse_movielens_data")
 def test_movielens_loader(mock_parse, mock_download):
     mock_download.return_value = "/dummy/ml-100k"
     mock_parse.return_value = (mock_ml_interactions, mock_ml_titles)
@@ -108,9 +108,9 @@ mock_amzn_interactions = [
 mock_amzn_metadata = {"asin1": "Shampoo", "asin2": "Conditioner", "asin3": "Lipstick"}
 
 
-@patch("generative_recommendation.datasets.amazon.download_amazon_files")
-@patch("generative_recommendation.datasets.amazon.parse_amazon_reviews")
-@patch("generative_recommendation.datasets.amazon.parse_amazon_metadata")
+@patch("datasets.amazon.download_amazon_files")
+@patch("datasets.amazon.parse_amazon_reviews")
+@patch("datasets.amazon.parse_amazon_metadata")
 def test_amazon_loader(mock_parse_meta, mock_parse_rev, mock_download):
     mock_download.return_value = ("/dummy/reviews.json.gz", "/dummy/meta.json.gz")
     mock_parse_rev.return_value = mock_amzn_interactions

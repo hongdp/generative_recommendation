@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "generative_recommendation"
+version = "0.1.0"
+description = "Generative Recommendation System using JAX/Flax"
+authors = [
+    { name = "HongDP" }
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "jax",
+    "jaxlib",
+    "flax",
+    "optax",
+    "einops",
+    "numpy",
+    "datasets",
+    "transformers",
+    "tokenizers",
+    "tqdm",
+    "grain",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "ruff",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/models", "src/datasets", "src/evaluation"]

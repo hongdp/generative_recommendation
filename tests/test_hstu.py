@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from generative_recommendation.models.hstu import HSTUBlock, HSTUModel, log_bucket
+from models.hstu import HSTUBlock, HSTUModel, log_bucket
 
 
 def test_log_bucket():

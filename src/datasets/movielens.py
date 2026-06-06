@@ -8,7 +8,7 @@ import urllib.request
 import zipfile
 from typing import Dict, List, Tuple, Union
 
-from generative_recommendation.datasets.base import SequenceDataset, build_sequence_data
+from datasets.base import SequenceDataset, build_sequence_data
 
 # Dataset download URLs
 URL_100K = "https://files.grouplens.org/datasets/movielens/ml-100k.zip"

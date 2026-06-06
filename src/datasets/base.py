@@ -67,7 +67,7 @@ def build_sequence_data(
             targets.append(seq[-2])
         elif split == "train":
             # Generate prefix sequences
-            for t in range(1, n - 1):
+            for t in range(1, n - 2):
                 inputs.append(pad_or_truncate(seq[:t], max_len, pad_val))
                 targets.append(seq[t])
 

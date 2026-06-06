@@ -10,7 +10,7 @@ import os
 import urllib.request
 from typing import Dict, List, Tuple, Union
 
-from generative_recommendation.datasets.base import SequenceDataset, build_sequence_data
+from datasets.base import SequenceDataset, build_sequence_data
 
 # Mapping of user-friendly names to SNAP category names
 CATEGORY_MAP = {

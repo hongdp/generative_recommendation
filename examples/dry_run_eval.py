@@ -11,9 +11,9 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from generative_recommendation.datasets.movielens import MovieLensDataLoader
-from generative_recommendation.evaluation.evaluator import Evaluator
-from generative_recommendation.models.hstu import HSTUModel
+from datasets.movielens import MovieLensDataLoader
+from evaluation.evaluator import Evaluator
+from models.hstu import HSTUModel
 
 
 def main():

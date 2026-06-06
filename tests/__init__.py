@@ -1,1 +1,1 @@
-# Test suite for generative_recommendation
+# Test suite for generative recommendation
