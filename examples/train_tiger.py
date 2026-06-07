@@ -98,6 +98,15 @@ def main():
     parser.add_argument("--semantic_ids_path", type=str, default="./data/semantic_ids.json", help="Path to Semantic IDs JSON file.")
     parser.add_argument("--dataset", type=str, default="ml-1m", choices=["ml-1m", "beauty", "sports", "toys", "steam"], help="Dataset name.")
     parser.add_argument("--patience", type=int, default=5, help="Patience for early stopping.")
+    parser.add_argument("--embedding_dim", type=int, default=384, help="Embedding dimension.")
+    parser.add_argument("--num_blocks", type=int, default=4, help="Number of model blocks.")
+    parser.add_argument("--num_heads", type=int, default=6, help="Number of attention heads.")
+    parser.add_argument("--attention_dim", type=int, default=384, help="Attention projection dimension.")
+    parser.add_argument("--linear_dim", type=int, default=1024, help="Linear layer projection dimension.")
+    parser.add_argument("--dropout_rate", type=float, default=0.1, help="Dropout rate.")
+    parser.add_argument("--learning_rate", type=float, default=5e-4, help="Learning rate.")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay rate.")
+    parser.add_argument("--batch_size", type=int, default=256, help="Batch size for training and evaluation.")
     args = parser.parse_args()
 
     dataset = args.dataset.lower()
@@ -108,7 +117,7 @@ def main():
     if args.semantic_ids_path == "./data/semantic_ids.json" and dataset != "ml-1m":
         args.semantic_ids_path = f"./data/semantic_ids_{dataset}.json"
 
-    print("--- Replicating TIGER Results on MovieLens-1M ---")
+    print(f"--- Replicating TIGER Results on {args.dataset.upper()} ---")
     print("Device list:", jax.devices())
 
     # 1. Load data
@@ -157,14 +166,14 @@ def main():
     print("Initializing TIGER Model...")
     model = TIGERModel(
         vocab_size=vocab_size,
-        embedding_dim=256,
-        num_blocks=4,
-        num_heads=4,
-        attention_dim=128,
-        linear_dim=512,
+        embedding_dim=args.embedding_dim,
+        num_blocks=args.num_blocks,
+        num_heads=args.num_heads,
+        attention_dim=args.attention_dim,
+        linear_dim=args.linear_dim,
         max_sequence_len=3 * max_len + 4,
-        attn_dropout_rate=0.2,
-        linear_dropout_rate=0.2,
+        attn_dropout_rate=args.dropout_rate,
+        linear_dropout_rate=args.dropout_rate,
     )
 
     key = jax.random.PRNGKey(42)
@@ -173,7 +182,7 @@ def main():
     params = variables["params"]
 
     # 4. Setup Optimizer
-    optimizer = optax.adamw(learning_rate=1e-3, weight_decay=1e-4)
+    optimizer = optax.adamw(learning_rate=args.learning_rate, weight_decay=args.weight_decay)
     opt_state = optimizer.init(params)
 
     # 5. Define training step
@@ -275,7 +284,9 @@ def main():
     # 8. Evaluation function
     semantic_id_to_item = {tuple(v): k for k, v in semantic_ids.items()}
     
-    def evaluate_tiger(params, tokens_in, targets, batch_size=512):
+    def evaluate_tiger(params, tokens_in, targets, batch_size=None):
+        if batch_size is None:
+            batch_size = args.batch_size
         num_samples = len(tokens_in)
         ranks = []
         
@@ -356,7 +367,7 @@ def main():
         if not args.resume_path:
             raise ValueError("Must specify --resume_path when using --eval_only.")
         print("\nRunning test evaluation only...")
-        test_results = evaluate_tiger(best_params, test_tokens_in, test_tar, batch_size=512)
+        test_results = evaluate_tiger(best_params, test_tokens_in, test_tar, batch_size=args.batch_size)
         print("\n--- Test Evaluation Results ---")
         for metric, score in test_results.items():
             print(f"{metric}: {score:.5f}")
@@ -364,7 +375,7 @@ def main():
 
     # 10. Training Loop
     epochs = args.epochs
-    batch_size = 512
+    batch_size = args.batch_size
     num_samples = len(train_tokens_tar)
     epoch_rng = jax.random.PRNGKey(777)
 
@@ -410,7 +421,7 @@ def main():
         # Evaluate on validation split every epoch
         if True:
             print(f"Evaluating validation split at epoch {epoch}...")
-            val_results = evaluate_tiger(params, val_tokens_in, val_tar, batch_size=512)
+            val_results = evaluate_tiger(params, val_tokens_in, val_tar, batch_size=args.batch_size)
             val_ndcg = val_results["NDCG@10"]
             val_hr = val_results["HR@10"]
             val_mrr = val_results["MRR"]
@@ -468,7 +479,7 @@ def main():
         best_params = params
 
     print("\nRunning final test evaluation...")
-    test_results = evaluate_tiger(best_params, test_tokens_in, test_tar, batch_size=512)
+    test_results = evaluate_tiger(best_params, test_tokens_in, test_tar, batch_size=args.batch_size)
 
     print("\n--- Final Test Evaluation Results ---")
     for metric, score in test_results.items():
@@ -486,9 +497,9 @@ def main():
     log_path = "experiment_results.md"
     model_desc = "TIGER (K-Means)" if "kmeans" in args.semantic_ids_path.lower() else "TIGER (VAE)"
     results_row = (
-        f"| {date_str} | Full {model_desc} (4 blocks, embed=256) on {args.dataset.upper()} | Local (GeForce RTX 4080) | "
+        f"| {date_str} | Full {model_desc} (blocks={args.num_blocks}, embed={args.embedding_dim}) on {args.dataset.upper()} | Local (GeForce RTX 4080) | "
         f"{test_results['HR@5']:.5f} | {test_results['NDCG@5']:.5f} | {test_results['HR@10']:.5f} | {test_results['NDCG@10']:.5f} | {test_results['HR@20']:.5f} | {test_results['NDCG@20']:.5f} | {test_results['MRR']:.5f} | "
-        f"Replication on {args.dataset} matching LIGER paper evaluation (Best Val NDCG@10={best_val_ndcg:.5f}) |"
+        f"Replication on {args.dataset} matching TIGER paper evaluation (Best Val NDCG@10={best_val_ndcg:.5f}) |"
     )
 
     with open(log_path, "a") as f:
