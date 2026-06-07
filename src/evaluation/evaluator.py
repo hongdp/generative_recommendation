@@ -10,9 +10,7 @@ import jax.numpy as jnp
 from evaluation.metrics import (
     compute_ranks,
     compute_text_ranks,
-    hit_rate_at_k,
-    ndcg_at_k,
-    mean_reciprocal_rank,
+    calculate_metrics_from_ranks,
 )
 
 
@@ -67,14 +65,7 @@ class Evaluator:
 
         all_ranks = np.array(all_ranks)
         
-        # Calculate metrics
-        results = {}
-        for k in self.k_list:
-            results[f"HR@{k}"] = hit_rate_at_k(all_ranks, k)
-            results[f"NDCG@{k}"] = ndcg_at_k(all_ranks, k)
-        results["MRR"] = mean_reciprocal_rank(all_ranks)
-
-        return results
+        return calculate_metrics_from_ranks(all_ranks, self.k_list)
 
     def evaluate_generative_text(
         self,
@@ -115,11 +106,4 @@ class Evaluator:
 
         all_ranks = np.array(all_ranks)
 
-        # Calculate metrics
-        results = {}
-        for k in self.k_list:
-            results[f"HR@{k}"] = hit_rate_at_k(all_ranks, k)
-            results[f"NDCG@{k}"] = ndcg_at_k(all_ranks, k)
-        results["MRR"] = mean_reciprocal_rank(all_ranks)
-
-        return results
+        return calculate_metrics_from_ranks(all_ranks, self.k_list)

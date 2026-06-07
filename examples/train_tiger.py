@@ -12,7 +12,7 @@ import flax.serialization
 
 from datasets import MovieLensDataLoader, AmazonDataLoader, SteamDataLoader
 from models.tiger_model import TIGERModel
-from evaluation.metrics import hit_rate_at_k, ndcg_at_k, mean_reciprocal_rank
+from evaluation.metrics import compute_ranks_from_predictions, calculate_metrics_from_ranks
 
 
 def sequence_to_tiger_tokens(item_seq, semantic_ids, K, start_token):
@@ -285,29 +285,20 @@ def main():
             c1_final, c2_final, c3_final = beam_search_decode(params, batch_in, B=beam_size)
             
             # Map paths to item mapped IDs
+            batch_predictions = []
             for j in range(len(batch_in)):
                 sample_preds = []
                 for b in range(beam_size):
                     path = (int(c1_final[j, b]), int(c2_final[j, b]), int(c3_final[j, b]))
                     item = semantic_id_to_item.get(path, 0)
                     sample_preds.append(item)
+                batch_predictions.append(sample_preds)
                 
-                # Check target rank
-                tar_item = batch_tar[j]
-                if tar_item in sample_preds:
-                    ranks.append(sample_preds.index(tar_item) + 1)
-                else:
-                    ranks.append(999999)
+            batch_ranks = compute_ranks_from_predictions(batch_predictions, batch_tar)
+            ranks.extend(batch_ranks)
 
         ranks = np.array(ranks)
-        results = {}
-        for k in [5, 10, 20]:
-            results[f"HR@{k}"] = hit_rate_at_k(ranks, k)
-            results[f"NDCG@{k}"] = ndcg_at_k(ranks, k)
-        results["HR@1"] = hit_rate_at_k(ranks, 1)
-        results["NDCG@1"] = ndcg_at_k(ranks, 1)
-        results["MRR"] = mean_reciprocal_rank(ranks)
-        return results
+        return calculate_metrics_from_ranks(ranks, k_list=[1, 5, 10, 20])
 
     # 9. Resume training setup
     writer = None

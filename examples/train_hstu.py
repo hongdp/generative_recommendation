@@ -167,7 +167,7 @@ def main():
     patience = 5  # Stop if validation NDCG doesn't improve for 5 checks
     patience_counter = 0
 
-    evaluator = Evaluator(k_list=[5, 10, 20])
+    evaluator = Evaluator(k_list=[1, 5, 10, 20])
 
     start_epoch = 1
     if args.resume_path:
@@ -260,9 +260,8 @@ def main():
             print(f"--- Validation @ Epoch {epoch} | NDCG@10: {val_ndcg:.5f} | HR@10: {val_hr:.5f} | MRR: {val_mrr:.5f}")
 
             if writer is not None:
-                writer.add_scalar("Val/NDCG@10", val_ndcg, global_step)
-                writer.add_scalar("Val/HR@10", val_hr, global_step)
-                writer.add_scalar("Val/MRR", val_mrr, global_step)
+                for metric, score in val_results.items():
+                    writer.add_scalar(f"Val/{metric}", score, global_step)
 
             # Check for improvement in ANY metric
             improved = False

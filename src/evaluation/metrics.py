@@ -6,7 +6,7 @@ and Mean Reciprocal Rank (MRR). Supports both index-based and text-based predict
 
 import jax.numpy as jnp
 import numpy as np
-from typing import Union, Sequence
+from typing import Union, Sequence, Dict
 
 
 def compute_ranks(
@@ -137,3 +137,58 @@ def compute_text_ranks(
             ranks[i] = 999999  # Not found
 
     return ranks
+
+
+def compute_ranks_from_predictions(
+    predictions: Sequence[Sequence[Union[int, str]]],
+    targets: Sequence[Union[int, str]],
+) -> np.ndarray:
+    """Computes 1-based target ranks from top-N predictions list.
+
+    Args:
+        predictions: sequence of sequences, shape (batch_size, top_k), where each
+          element is a predicted item ID or string.
+        targets: sequence of target items, shape (batch_size,).
+
+    Returns:
+        ranks: numpy array of shape (batch_size,) containing 1-based ranks. If not found,
+          rank is set to a large number (e.g. 999999) to indicate no match.
+    """
+    batch_size = len(targets)
+    ranks = np.zeros(batch_size, dtype=np.int32)
+
+    for i in range(batch_size):
+        target = targets[i]
+        found_idx = -1
+        for idx, pred in enumerate(predictions[i]):
+            if pred == target:
+                found_idx = idx
+                break
+
+        if found_idx != -1:
+            ranks[i] = found_idx + 1
+        else:
+            ranks[i] = 999999  # Not found
+
+    return ranks
+
+
+def calculate_metrics_from_ranks(
+    ranks: np.ndarray,
+    k_list: Sequence[int] = (1, 5, 10, 20),
+) -> Dict[str, float]:
+    """Computes all recommendation metrics given 1-based target ranks.
+
+    Args:
+        ranks: array of shape (batch_size,) containing 1-based target ranks.
+        k_list: list of K values to compute HR@K and NDCG@K.
+
+    Returns:
+        A dictionary containing HR@K, NDCG@K, and MRR.
+    """
+    results = {}
+    for k in k_list:
+        results[f"HR@{k}"] = hit_rate_at_k(ranks, k)
+        results[f"NDCG@{k}"] = ndcg_at_k(ranks, k)
+    results["MRR"] = mean_reciprocal_rank(ranks)
+    return results
