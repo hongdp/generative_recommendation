@@ -97,6 +97,7 @@ def main():
     parser.add_argument("--tb_log_dir", type=str, default="./data/tensorboard/tiger_ml1m", help="TensorBoard log directory.")
     parser.add_argument("--semantic_ids_path", type=str, default="./data/semantic_ids.json", help="Path to Semantic IDs JSON file.")
     parser.add_argument("--dataset", type=str, default="ml-1m", choices=["ml-1m", "beauty", "sports", "toys", "steam"], help="Dataset name.")
+    parser.add_argument("--patience", type=int, default=5, help="Patience for early stopping.")
     args = parser.parse_args()
 
     dataset = args.dataset.lower()
@@ -278,6 +279,11 @@ def main():
         num_samples = len(tokens_in)
         ranks = []
         
+        total_paths = 0
+        valid_paths = 0
+        total_top1_paths = 0
+        valid_top1_paths = 0
+        
         for i in range(0, num_samples, batch_size):
             batch_in = tokens_in[i : i + batch_size]
             batch_tar = targets[i : i + batch_size]
@@ -290,15 +296,28 @@ def main():
                 sample_preds = []
                 for b in range(beam_size):
                     path = (int(c1_final[j, b]), int(c2_final[j, b]), int(c3_final[j, b]))
+                    is_valid = path in semantic_id_to_item
                     item = semantic_id_to_item.get(path, 0)
                     sample_preds.append(item)
+                    
+                    total_paths += 1
+                    if is_valid:
+                        valid_paths += 1
+                    if b == 0:
+                        total_top1_paths += 1
+                        if is_valid:
+                            valid_top1_paths += 1
+                            
                 batch_predictions.append(sample_preds)
                 
             batch_ranks = compute_ranks_from_predictions(batch_predictions, batch_tar)
             ranks.extend(batch_ranks)
 
         ranks = np.array(ranks)
-        return calculate_metrics_from_ranks(ranks, k_list=[1, 5, 10, 20])
+        results = calculate_metrics_from_ranks(ranks, k_list=[1, 5, 10, 20])
+        results["Valid@1"] = float(valid_top1_paths) / total_top1_paths if total_top1_paths > 0 else 0.0
+        results["Valid@Beam"] = float(valid_paths) / total_paths if total_paths > 0 else 0.0
+        return results
 
     # 9. Resume training setup
     writer = None
@@ -311,7 +330,7 @@ def main():
     best_val_ndcg = -1.0
     best_params = None
     best_val_metrics = {}
-    patience = 5
+    patience = args.patience
     patience_counter = 0
 
     if args.resume_path:
@@ -401,9 +420,11 @@ def main():
                 for metric, score in val_results.items():
                     writer.add_scalar(f"Val/{metric}", score, global_step)
 
-            # Check for improvement in ANY metric
+            # Check for improvement in ANY metric (excluding validity metrics)
             improved = False
             for metric, score in val_results.items():
+                if metric in ["Valid@1", "Valid@Beam"]:
+                    continue
                 if metric not in best_val_metrics or score > best_val_metrics[metric]:
                     best_val_metrics[metric] = score
                     improved = True

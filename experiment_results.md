@@ -27,3 +27,4 @@ This file documents all training runs, evaluations, and benchmarks. Refer to [SK
 | 2026-06-06 | Full HSTU (blocks=4, embed=256) on STEAM | Local (GeForce RTX 4080) | 0.17071 | 0.14849 | 0.20537 | 0.15963 | 0.25475 | 0.17205 | 0.15487 | Replication on steam matching LIGER paper evaluation (Best Val NDCG@10=0.18403) |
 
 | 2026-06-07 | Full TIGER (VAE) (4 blocks, embed=256) on STEAM | Local (GeForce RTX 4080) | 0.15523 | 0.13832 | 0.18185 | 0.14688 | 0.21612 | 0.15555 | 0.13867 | Replication on steam matching LIGER paper evaluation (Best Val NDCG@10=0.16971) |
+| 2026-06-07 | Full TIGER (K-Means) (4 blocks, embed=256) on STEAM | Local (GeForce RTX 4080) | 0.13924 | 0.12362 | 0.16457 | 0.13176 | 0.19809 | 0.14021 | 0.12414 | Replication on steam matching LIGER paper evaluation (Best Val NDCG@10=0.15211) |

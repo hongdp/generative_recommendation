@@ -68,6 +68,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay rate.")
     parser.add_argument("--batch_size", type=int, default=512, help="Batch size for training.")
     parser.add_argument("--dataset", type=str, default="ml-1m", choices=["ml-1m", "beauty", "sports", "toys", "steam"], help="Dataset name.")
+    parser.add_argument("--patience", type=int, default=5, help="Patience for early stopping.")
     args = parser.parse_args()
 
     dataset = args.dataset.lower()
@@ -164,7 +165,7 @@ def main():
     best_val_ndcg = -1.0
     best_params = None
     best_val_metrics = {}
-    patience = 5  # Stop if validation NDCG doesn't improve for 5 checks
+    patience = args.patience  # Stop if validation doesn't improve
     patience_counter = 0
 
     evaluator = Evaluator(k_list=[1, 5, 10, 20])
