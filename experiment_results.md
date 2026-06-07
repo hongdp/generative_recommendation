@@ -4,12 +4,25 @@ This file documents all training runs, evaluations, and benchmarks. Refer to [SK
 
 ## Trials Log
 
-| Date | Goal / Configuration | Environment / Hardware | Key Metrics (Loss, PPL, MFU) | Notes & Link |
-|------|--------------------|-----------------------|------------------------------|--------------|
-| 2026-06-06 | Dry-run baseline evaluation on MovieLens-100K (Random vs Most Popular) | Local (CPU) | Random: HR@10=0.00848, NDCG@10=0.00409, MRR=0.00580; Most-Pop: HR@10=0.04984, NDCG@10=0.02303, MRR=0.01490 | End-to-end pipeline verification completed |
-| 2026-06-06 | HSTUModel next-item prediction on MovieLens-100K | Local (CPU) | Pre-train: MRR=0.00259; Post-train (5 epochs): HR@1=0.00742, HR@5=0.06681, HR@10=0.13786, NDCG@5=0.03692, NDCG@10=0.05943, MRR=0.05283 | Converged and ranking metrics improved significantly (+0.05024 MRR) |
+| Date | Configuration | Hardware | HR@5 | NDCG@5 | HR@10 | NDCG@10 | HR@20 | NDCG@20 | MRR | Notes |
+|:---|:---|:---|---:|---:|---:|---:|---:|---:|---:|:---|
+| 2026-06-06 | MovieLens-100K Baseline (Random) | Local (CPU) | - | - | 0.00848 | 0.00409 | - | - | 0.00580 | Random recommendation baseline |
+| 2026-06-06 | MovieLens-100K Baseline (Most Popular) | Local (CPU) | - | - | 0.04984 | 0.02303 | - | - | 0.01490 | Most Popular recommendation baseline |
+| 2026-06-06 | HSTUModel next-item pred (5 epochs) on ML-100K | Local (CPU) | 0.06681 | 0.03692 | 0.13786 | 0.05943 | - | - | 0.05283 | Converged and ranking metrics improved significantly (+0.05024 MRR) |
+| 2026-06-06 | Full HSTUModel (4 blocks, embed=256) on ML-1M | Local (GeForce RTX 4080) | 0.13212 | 0.08459 | 0.20414 | 0.10770 | - | - | 0.09371 | Best Val NDCG@10=-1.00000; Test metrics replicated |
+| 2026-06-06 | Full HSTUModel (4 blocks, embed=256) on ML-1M | Local (GeForce RTX 4080) | 0.14818 | 0.09544 | 0.23725 | 0.12411 | - | - | 0.10549 | Best Val NDCG@10=0.13163; Test metrics replicated |
+| 2026-06-06 | Full HSTUModel (4 blocks, paused Epoch 14) on ML-1M | Local (GeForce RTX 4080) | 0.19023 | 0.12933 | 0.27384 | 0.15601 | - | - | 0.13502 | Paused run at Epoch 14 (Best Val Epoch 12). Strong convergence. |
+| 2026-06-06 | Full TIGERModel (4 blocks, embed=256) on ML-1M | Local (GeForce RTX 4080) | 0.17169 | 0.11905 | 0.24156 | 0.14169 | - | - | 0.11112 | Best Val NDCG@10=0.15646; Test metrics replicated |
+| 2026-06-06 | Full TIGERModel (4 blocks, embed=256) on ML-1M | Local (GeForce RTX 4080) | 0.15348 | 0.10610 | 0.20927 | 0.12417 | - | - | 0.09804 | Best Val NDCG@10=0.13230; Test metrics replicated |
+| 2026-06-06 | Full TIGER (VAE) (4 blocks, embed=256) on BEAUTY | Local (GeForce RTX 4080) | 0.02455 | 0.01671 | 0.03792 | 0.02101 | 0.05809 | 0.02607 | 0.01727 | Replication on beauty matching LIGER paper evaluation |
+| 2026-06-06 | Full HSTU (blocks=4, embed=256) on BEAUTY | Local (GeForce RTX 4080) | 0.04507 | 0.03208 | 0.06479 | 0.03844 | 0.09270 | 0.04543 | 0.03534 | Replication on beauty matching LIGER paper evaluation (Best Val NDCG@10=0.05068) |
+| 2026-06-06 | Full TIGER (VAE) (4 blocks, embed=256) on BEAUTY | Local (GeForce RTX 4080) | 0.02357 | 0.01597 | 0.03564 | 0.01980 | 0.05424 | 0.02450 | 0.01633 | Replication on beauty matching LIGER paper evaluation (Best Val NDCG@10=0.02776) |
+| 2026-06-06 | Full TIGER (K-Means) (4 blocks, embed=256) on BEAUTY | Local (GeForce RTX 4080) | 0.02513 | 0.01645 | 0.03957 | 0.02112 | 0.05858 | 0.02590 | 0.01683 | Replication on beauty matching LIGER paper evaluation (Best Val NDCG@10=0.02982) |
+| 2026-06-06 | Full HSTU (blocks=4, embed=256) on SPORTS | Local (GeForce RTX 4080) | 0.02568 | 0.01812 | 0.03731 | 0.02187 | 0.05174 | 0.02549 | 0.02035 | Replication on sports matching LIGER paper evaluation (Best Val NDCG@10=0.02898) |
+| 2026-06-06 | Full TIGER (VAE) (4 blocks, embed=256) on SPORTS | Local (GeForce RTX 4080) | 0.01264 | 0.00828 | 0.02056 | 0.01081 | 0.03163 | 0.01361 | 0.00865 | Replication on sports matching LIGER paper evaluation (Best Val NDCG@10=0.01508) |
+| 2026-06-06 | Full TIGER (K-Means) (4 blocks, embed=256) on SPORTS | Local (GeForce RTX 4080) | 0.01208 | 0.00777 | 0.02174 | 0.01089 | 0.03349 | 0.01385 | 0.00846 | Replication on sports matching LIGER paper evaluation (Best Val NDCG@10=0.01375) |
+| 2026-06-06 | Full HSTU (blocks=4, embed=256) on TOYS | Local (GeForce RTX 4080) | 0.04708 | 0.03442 | 0.06238 | 0.03933 | 0.08289 | 0.04452 | 0.03643 | Replication on toys matching LIGER paper evaluation (Best Val NDCG@10=0.04994) |
+| 2026-06-06 | Full TIGER (VAE) (4 blocks, embed=256) on TOYS | Local (GeForce RTX 4080) | 0.01927 | 0.01236 | 0.02885 | 0.01545 | 0.04137 | 0.01859 | 0.01223 | Replication on toys matching LIGER paper evaluation (Best Val NDCG@10=0.01852) |
+| 2026-06-06 | Full TIGER (K-Means) (4 blocks, embed=256) on TOYS | Local (GeForce RTX 4080) | 0.02169 | 0.01447 | 0.03379 | 0.01839 | 0.05244 | 0.02305 | 0.01499 | Replication on toys matching LIGER paper evaluation (Best Val NDCG@10=0.02065) |
+| 2026-06-06 | Full HSTU (blocks=4, embed=256) on STEAM | Local (GeForce RTX 4080) | 0.17071 | 0.14849 | 0.20537 | 0.15963 | 0.25475 | 0.17205 | 0.15487 | Replication on steam matching LIGER paper evaluation (Best Val NDCG@10=0.18403) |
 
-
-| 2026-06-06 | Full HSTUModel (4 blocks, embed=256) on ML-1M | Local (GeForce RTX 4080) | Best Val NDCG@10=-1.00000; Test: HR@1=0.03626, HR@5=0.13212, HR@10=0.20414, NDCG@5=0.08459, NDCG@10=0.10770, MRR=0.09371 | Fully converged replication. Meets/exceeds original paper baselines |
-| 2026-06-06 | Full HSTUModel (4 blocks, embed=256) on ML-1M | Local (GeForce RTX 4080) | Best Val NDCG@10=0.13163; Test: HR@1=0.04222, HR@5=0.14818, HR@10=0.23725, NDCG@5=0.09544, NDCG@10=0.12411, MRR=0.10549 | Fully converged replication. Meets/exceeds original paper baselines |
-| 2026-06-06 | Full HSTUModel (4 blocks, embed=256) on ML-1M, paused at Epoch 14 | Local (GeForce RTX 4080) | Best Val NDCG@10=0.16485; Test: HR@1=0.06705, HR@5=0.19023, HR@10=0.27384, NDCG@5=0.12933, NDCG@10=0.15601, MRR=0.13502 | Paused run at Epoch 14 (Best Val Epoch 12). Strong convergence meeting paper baseline. |

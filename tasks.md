@@ -18,6 +18,7 @@ This document tracks subsequent tasks and their progress.
 - [ ] **Task 3**: Implement and evaluate RQ-KMeans semantic ID generator and run comparative TIGER experiments.
     - [x] **Task 3.1**: Implement RQ-KMeans semantic ID generator.
     - [ ] **Task 3.2**: Train and evaluate TIGER model with K-Means Semantic IDs.
+- [x] **Task 4**: Rename `examples/train_full_movielens.py` to `examples/train_hstu.py` and update all imports and references.
 
 ## Skipped / Rejected / Insufficient Resources
 

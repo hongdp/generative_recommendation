@@ -10,7 +10,7 @@ import numpy as np
 import optax
 import flax.serialization
 
-from datasets.movielens import MovieLensDataLoader
+from datasets import MovieLensDataLoader, AmazonDataLoader, SteamDataLoader
 from models.tiger_model import TIGERModel
 from evaluation.metrics import hit_rate_at_k, ndcg_at_k, mean_reciprocal_rank
 
@@ -89,21 +89,37 @@ def preprocess_training_data(inputs, targets, semantic_ids, K, start_token):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TIGER training and evaluation on MovieLens-1M.")
+    parser = argparse.ArgumentParser(description="TIGER training and evaluation on sequential recommendation datasets.")
     parser.add_argument("--checkpoint_dir", type=str, default="./data/tiger_checkpoints", help="Directory to save checkpoints.")
     parser.add_argument("--resume_path", type=str, default="", help="Path to checkpoint to resume training or evaluate.")
     parser.add_argument("--eval_only", action="store_true", help="Only run test set evaluation using --resume_path.")
     parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs.")
     parser.add_argument("--tb_log_dir", type=str, default="./data/tensorboard/tiger_ml1m", help="TensorBoard log directory.")
     parser.add_argument("--semantic_ids_path", type=str, default="./data/semantic_ids.json", help="Path to Semantic IDs JSON file.")
+    parser.add_argument("--dataset", type=str, default="ml-1m", choices=["ml-1m", "beauty", "sports", "toys", "steam"], help="Dataset name.")
     args = parser.parse_args()
+
+    dataset = args.dataset.lower()
+    if args.checkpoint_dir == "./data/tiger_checkpoints" and dataset != "ml-1m":
+        args.checkpoint_dir = f"./data/tiger_{dataset}_checkpoints"
+    if args.tb_log_dir == "./data/tensorboard/tiger_ml1m" and dataset != "ml-1m":
+        args.tb_log_dir = f"./data/tensorboard/tiger_{dataset}"
+    if args.semantic_ids_path == "./data/semantic_ids.json" and dataset != "ml-1m":
+        args.semantic_ids_path = f"./data/semantic_ids_{dataset}.json"
 
     print("--- Replicating TIGER Results on MovieLens-1M ---")
     print("Device list:", jax.devices())
 
     # 1. Load data
     data_dir = "./data"
-    loader = MovieLensDataLoader(dataset_name="ml-1m", data_dir=data_dir, min_rating=0)
+    if dataset == "ml-1m":
+        loader = MovieLensDataLoader(dataset_name="ml-1m", data_dir=data_dir, min_rating=0)
+    elif dataset in ["beauty", "sports", "toys"]:
+        loader = AmazonDataLoader(category=dataset, data_dir=data_dir, min_rating=0)
+    elif dataset == "steam":
+        loader = SteamDataLoader(data_dir=data_dir)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
     print(f"Dataset stats: Users = {loader.num_users}, Items = {loader.num_items}")
 
     # Load Semantic IDs
@@ -118,8 +134,8 @@ def main():
     K = 256  # Codebook size
     vocab_size = 3 * K + 2  # c1: [1, 256], c2: [257, 512], c3: [513, 768], start: 769, pad: 0
     start_token = vocab_size - 1
-    max_len = 50
-    beam_size = 10
+    max_len = 20 if dataset in ["beauty", "sports", "toys", "steam"] else 50
+    beam_size = 20
 
     # 2. Get splits and format to JAX/TIGER tokens
     print("Preprocessing datasets into TIGER tokens...")
@@ -285,9 +301,11 @@ def main():
 
         ranks = np.array(ranks)
         results = {}
-        for k in [1, 5, 10]:
+        for k in [5, 10, 20]:
             results[f"HR@{k}"] = hit_rate_at_k(ranks, k)
             results[f"NDCG@{k}"] = ndcg_at_k(ranks, k)
+        results["HR@1"] = hit_rate_at_k(ranks, 1)
+        results["NDCG@1"] = ndcg_at_k(ranks, 1)
         results["MRR"] = mean_reciprocal_rank(ranks)
         return results
 
@@ -301,6 +319,7 @@ def main():
     start_epoch = 1
     best_val_ndcg = -1.0
     best_params = None
+    best_val_metrics = {}
     patience = 5
     patience_counter = 0
 
@@ -320,6 +339,7 @@ def main():
         start_epoch = checkpoint_state["epoch"] + 1
         best_val_ndcg = float(checkpoint_state["best_val_ndcg"])
         best_params = params
+        best_val_metrics["NDCG@10"] = best_val_ndcg
         print(f"Resumed from epoch {checkpoint_state['epoch']} with best validation NDCG@10 = {best_val_ndcg:.5f}")
 
     if args.eval_only:
@@ -387,15 +407,21 @@ def main():
             print(f"--- Validation @ Epoch {epoch} | NDCG@10: {val_ndcg:.5f} | HR@10: {val_hr:.5f} | MRR: {val_mrr:.5f}")
 
             if writer is not None:
-                writer.add_scalar("Val/NDCG@10", val_ndcg, global_step)
-                writer.add_scalar("Val/HR@10", val_hr, global_step)
-                writer.add_scalar("Val/MRR", val_mrr, global_step)
+                for metric, score in val_results.items():
+                    writer.add_scalar(f"Val/{metric}", score, global_step)
 
-            if val_ndcg > best_val_ndcg:
-                best_val_ndcg = val_ndcg
+            # Check for improvement in ANY metric
+            improved = False
+            for metric, score in val_results.items():
+                if metric not in best_val_metrics or score > best_val_metrics[metric]:
+                    best_val_metrics[metric] = score
+                    improved = True
+
+            if improved:
+                best_val_ndcg = best_val_metrics.get("NDCG@10", best_val_ndcg)
                 best_params = params
                 patience_counter = 0
-                print(">>> New best validation score! Saving checkpoint...")
+                print(">>> New best validation score on at least one metric! Saving checkpoint...")
                 os.makedirs(args.checkpoint_dir, exist_ok=True)
                 checkpoint_path = os.path.join(args.checkpoint_dir, "best_checkpoint.msgpack")
                 checkpoint_state = {
@@ -410,7 +436,7 @@ def main():
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
-                    print(f"\nEarly stopping triggered at epoch {epoch} (no validation improvement for {patience * 2} epochs).")
+                    print(f"\nEarly stopping triggered at epoch {epoch} (no validation improvement on any metric for {patience} epochs).")
                     break
 
         # Save latest checkpoint
@@ -443,13 +469,14 @@ def main():
         print("TensorBoard writer closed.")
 
     # 12. Document results in experiment_results.md
+    from datetime import datetime
+    date_str = datetime.now().strftime("%Y-%m-%d")
     log_path = "experiment_results.md"
+    model_desc = "TIGER (K-Means)" if "kmeans" in args.semantic_ids_path.lower() else "TIGER (VAE)"
     results_row = (
-        f"| 2026-06-06 | Full TIGERModel (4 blocks, embed=256) on ML-1M | Local (GeForce RTX 4080) | "
-        f"Best Val NDCG@10={best_val_ndcg:.5f}; "
-        f"Test: HR@1={test_results['HR@1']:.5f}, HR@5={test_results['HR@5']:.5f}, HR@10={test_results['HR@10']:.5f}, "
-        f"NDCG@5={test_results['NDCG@5']:.5f}, NDCG@10={test_results['NDCG@10']:.5f}, MRR={test_results['MRR']:.5f} | "
-        f"Fully converged replication. Meets/exceeds original paper baselines |"
+        f"| {date_str} | Full {model_desc} (4 blocks, embed=256) on {args.dataset.upper()} | Local (GeForce RTX 4080) | "
+        f"{test_results['HR@5']:.5f} | {test_results['NDCG@5']:.5f} | {test_results['HR@10']:.5f} | {test_results['NDCG@10']:.5f} | {test_results['HR@20']:.5f} | {test_results['NDCG@20']:.5f} | {test_results['MRR']:.5f} | "
+        f"Replication on {args.dataset} matching LIGER paper evaluation (Best Val NDCG@10={best_val_ndcg:.5f}) |"
     )
 
     with open(log_path, "a") as f:

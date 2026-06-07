@@ -9,26 +9,38 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from datasets.movielens import MovieLensDataLoader
+from datasets import MovieLensDataLoader, AmazonDataLoader, SteamDataLoader
 from datasets.embeddings import extract_movie_embeddings
 from models.rqvae import RQVAE
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train RQ-VAE on MovieLens-1M.")
+    parser = argparse.ArgumentParser(description="Train RQ-VAE on sequential recommendation datasets.")
     parser.add_argument("--epochs", type=int, default=200, help="Number of training epochs.")
     parser.add_argument("--data_dir", type=str, default="./data", help="Directory for data.")
+    parser.add_argument("--dataset", type=str, default="ml-1m", choices=["ml-1m", "beauty", "sports", "toys", "steam"], help="Dataset name.")
     args = parser.parse_args()
 
-    print("--- Training RQ-VAE for TIGER Semantic IDs ---")
+    print(f"--- Training RQ-VAE for TIGER Semantic IDs on {args.dataset} ---")
     print("Device list:", jax.devices())
     device = "cuda" if jax.local_devices()[0].platform == "gpu" else "cpu"
     print(f"Using device: {device}")
 
-    # 1. Load MovieLens-1M to get item mapping and titles
+    # 1. Load dataset to get item mapping and titles
     data_dir = args.data_dir
-    print(f"Loading MovieLens-1M dataset from {data_dir}...")
-    loader = MovieLensDataLoader(dataset_name="ml-1m", data_dir=data_dir, min_rating=0)
+    dataset = args.dataset.lower()
+    if dataset == "ml-1m":
+        print(f"Loading MovieLens-1M dataset from {data_dir}...")
+        loader = MovieLensDataLoader(dataset_name="ml-1m", data_dir=data_dir, min_rating=0)
+    elif dataset in ["beauty", "sports", "toys"]:
+        print(f"Loading Amazon {dataset} dataset from {data_dir}...")
+        loader = AmazonDataLoader(category=dataset, data_dir=data_dir, min_rating=0)
+    elif dataset == "steam":
+        print(f"Loading Steam dataset from {data_dir}...")
+        loader = SteamDataLoader(data_dir=data_dir)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+
     print(f"Dataset stats: Users = {loader.num_users}, Items = {loader.num_items}")
 
     # 2. Extract title embeddings
@@ -156,7 +168,8 @@ def main():
         for i in range(len(indices))
     }
     
-    output_path = os.path.join(data_dir, "semantic_ids.json")
+    output_filename = "semantic_ids.json" if dataset == "ml-1m" else f"semantic_ids_{dataset}.json"
+    output_path = os.path.join(data_dir, output_filename)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(semantic_ids_dict, f, indent=2)

@@ -31,10 +31,10 @@ All runner scripts reside in the `examples/` directory. Ensure `PYTHONPATH=src` 
 To train an index-based recommendation model:
 ```bash
 # Train HSTU Model (default)
-PYTHONPATH=src python examples/train_full_movielens.py --model hstu --epochs 40
+PYTHONPATH=src python examples/train_hstu.py --model hstu --epochs 40
 
 # Train other pluggable architectures (e.g. Transformer)
-PYTHONPATH=src python examples/train_full_movielens.py --model transformer --epochs 40
+PYTHONPATH=src python examples/train_hstu.py --model transformer --epochs 40
 ```
 
 ### 2. Generative Recommendation Model (TIGER)

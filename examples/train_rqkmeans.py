@@ -6,7 +6,7 @@ import json
 import time
 import numpy as np
 
-from datasets.movielens import MovieLensDataLoader
+from datasets import MovieLensDataLoader, AmazonDataLoader, SteamDataLoader
 from datasets.embeddings import extract_movie_embeddings
 
 
@@ -47,18 +47,29 @@ def kmeans(X, K, max_iter=30, tol=1e-4):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run RQ-KMeans on MovieLens-1M.")
+    parser = argparse.ArgumentParser(description="Run RQ-KMeans on sequential recommendation datasets.")
     parser.add_argument("--data_dir", type=str, default="./data", help="Directory for data.")
     parser.add_argument("--num_levels", type=int, default=3, help="Number of quantization levels.")
     parser.add_argument("--num_codes", type=int, default=256, help="Codebook size (K) per level.")
+    parser.add_argument("--dataset", type=str, default="ml-1m", choices=["ml-1m", "beauty", "sports", "toys", "steam"], help="Dataset name.")
     args = parser.parse_args()
 
-    print("--- Running RQ-KMeans for TIGER Semantic IDs ---")
+    print(f"--- Running RQ-KMeans for TIGER Semantic IDs on {args.dataset} ---")
 
-    # 1. Load MovieLens-1M to get item mapping and titles
+    # 1. Load dataset to get item mapping and titles
     data_dir = args.data_dir
-    print(f"Loading MovieLens-1M dataset from {data_dir}...")
-    loader = MovieLensDataLoader(dataset_name="ml-1m", data_dir=data_dir, min_rating=0)
+    dataset = args.dataset.lower()
+    if dataset == "ml-1m":
+        print(f"Loading MovieLens-1M dataset from {data_dir}...")
+        loader = MovieLensDataLoader(dataset_name="ml-1m", data_dir=data_dir, min_rating=0)
+    elif dataset in ["beauty", "sports", "toys"]:
+        print(f"Loading Amazon {dataset} dataset from {data_dir}...")
+        loader = AmazonDataLoader(category=dataset, data_dir=data_dir, min_rating=0)
+    elif dataset == "steam":
+        print(f"Loading Steam dataset from {data_dir}...")
+        loader = SteamDataLoader(data_dir=data_dir)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
     print(f"Dataset stats: Users = {loader.num_users}, Items = {loader.num_items}")
 
     # 2. Extract title embeddings (CPU execution to avoid GPU contention)
@@ -125,7 +136,8 @@ def main():
         for i in range(len(full_indices))
     }
     
-    output_path = os.path.join(data_dir, "semantic_ids_kmeans.json")
+    output_filename = "semantic_ids_kmeans.json" if dataset == "ml-1m" else f"semantic_ids_kmeans_{dataset}.json"
+    output_path = os.path.join(data_dir, output_filename)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(semantic_ids_dict, f, indent=2)
