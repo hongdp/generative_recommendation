@@ -1,67 +1,91 @@
-# Generative Recommendation System
+# Generative & Index-Based Sequential Recommendation System (JAX/Flax)
 
-A JAX/Flax-based generative recommendation system utilizing LLM/Transformer architectures.
+A high-performance sequential recommendation library built using JAX and Flax, featuring state-of-the-art architectures:
+1. **HSTU (Hierarchical Sequential Transduction Unit)**: The index-based sequence model reported in the ICML 2024 paper.
+2. **TIGER (Generative Retrieval)**: A generative recommendation framework using Semantic ID quantization (supporting both RQ-VAE and RQ-KMeans).
+3. **SASRec-style Transformer**: Standard causal attention model architecture.
 
-## Getting Started
+---
 
-1. Set up the Conda environment (see details in [SKILL.md](file:///home/hongdp/Workspace/generative_recommendation/SKILL.md)).
-2. Install the package in editable mode:
-   ```bash
-   pip install -e ".[dev]"
-   ```
-3. Run tests to verify setup:
-   ```bash
-   pytest
-   ```
+## 🚀 Getting Started
 
-## Project Structure
+### 1. Setup Environment
+Ensure you have a JAX-compatible environment set up. Detailed instructions are available in [SKILL.md](file:///home/hongdp/Workspace/generative_recommendation/SKILL.md).
 
-- `src/`: Core library code containing `models`, `datasets`, and `evaluation` components.
-- `examples/`: Executable scripts for training and evaluation.
-- `tests/`: Unit and integration tests.
-- `SKILL.md`: Documented development principles, environment guidelines, and learnings.
-- `experiment_results.md`: Logs for training runs and evaluation results.
-- `tasks.md`: Track backlog and execution progress.
-
-## Running Experiments
-
-All runner scripts reside in the `examples/` directory. Ensure `PYTHONPATH=src` is prefixed when running.
-
-### 1. Index-Based Sequential Models (HSTU / Pluggable Transformer)
-To train an index-based recommendation model:
+### 2. Install Project
+Install the codebase in editable mode with development dependencies:
 ```bash
-# Train HSTU Model (default)
-PYTHONPATH=src python examples/train_hstu.py --model hstu --epochs 40
-
-# Train other pluggable architectures (e.g. Transformer)
-PYTHONPATH=src python examples/train_hstu.py --model transformer --epochs 40
+pip install -e ".[dev]"
 ```
 
-### 2. Generative Recommendation Model (TIGER)
-TIGER requires discrete item Semantic IDs to be generated first.
-
-#### Step A: Generate Semantic IDs
-You can choose between the deep autoencoder method (RQ-VAE) or the clustering-based method (RQ-KMeans):
+### 3. Run Unit & Integration Tests
+Verify the entire library and its modules (data loaders, model shapes, step logic, ranking metrics):
 ```bash
-# Option A: Train Residual Quantization VAE (200 epochs)
-PYTHONPATH=src python examples/train_rqvae.py --epochs 200
-
-# Option B: Run Residual Quantization K-Means (fast, CPU-only)
-PYTHONPATH=src python examples/train_rqkmeans.py
+PYTHONPATH=src pytest
 ```
 
-#### Step B: Train TIGER Sequence Model
-Once Semantic IDs are written to `./data/`, train TIGER:
+---
+
+## 📂 Project Structure
+
+* `src/`: Core library modules.
+  * `datasets/`: Preprocessing, sequence splitting, and data loading pipelines for **MovieLens-1M**, **Amazon (Beauty, Sports, Toys)**, and **Steam** datasets.
+  * `models/`: Implementations of `HSTUModel`, `TransformerModel`, `TIGERModel`, and `RQVAE`.
+  * `evaluation/`: Evaluator components computing standard ranking metrics: Hit Rate (HR@K), Normalized Discounted Cumulative Gain (NDCG@K), and Mean Reciprocal Rank (MRR).
+* `examples/`: Train & evaluation runner scripts.
+  * `train_hstu.py`: Generic runner for index-based sequential architectures (`--model hstu` or `--model transformer`).
+  * `train_rqvae.py` / `train_rqkmeans.py`: Semantic ID generation scripts using deep autoencoders or fast clustering.
+  * `train_tiger.py`: Runner for generative retrieval recommendation.
+  * `run_all_experiments.py`: Script to automate ID generation, training, and evaluation across Beauty, Sports, Toys, and Steam datasets.
+* `SKILL.md`: Documented JAX/Flax development guidelines, memory-efficient training rules, and experience log.
+* `experiment_results.md`: Complete comparative baseline records of all experiments.
+* `tasks.md`: Project roadmap and backlog task status.
+
+---
+
+## 🧪 Running Experiments
+
+All scripts support pluggable datasets via the `--dataset` CLI parameter (`ml-1m`, `beauty`, `sports`, `toys`, `steam`).
+
+### 1. Sequential Index-Based Model
 ```bash
-# Train TIGER with VAE Semantic IDs (default)
-PYTHONPATH=src python examples/train_tiger.py --epochs 30 --semantic_ids_path ./data/semantic_ids.json
+# Train HSTU on Steam
+PYTHONPATH=src python examples/train_hstu.py --model hstu --dataset steam --epochs 30
+
+# Train standard Transformer on MovieLens-1M
+PYTHONPATH=src python examples/train_hstu.py --model transformer --dataset ml-1m --epochs 40
+```
+
+### 2. Generative Retrieval Model (TIGER)
+Generative retrieval first tokenizes items into discrete Semantic IDs, then trains the TIGER sequence-to-sequence model using teacher-forcing.
+
+#### Step A: Generate Semantic IDs (RQ-VAE or RQ-KMeans)
+Choose between the neural Residual Quantization VAE or the fast sequential K-Means clustering method:
+```bash
+# Option A: Train RQ-VAE (e.g. on Sports dataset)
+PYTHONPATH=src python examples/train_rqvae.py --dataset sports --epochs 200
+
+# Option B: Run CPU-friendly RQ-KMeans (runs in seconds)
+PYTHONPATH=src python examples/train_rqkmeans.py --dataset sports
+```
+
+#### Step B: Train TIGER
+```bash
+# Train TIGER with VAE Semantic IDs
+PYTHONPATH=src python examples/train_tiger.py --dataset sports --epochs 30 --semantic_ids_path ./data/semantic_ids_sports.json
 
 # Train TIGER with KMeans Semantic IDs
-PYTHONPATH=src python examples/train_tiger.py --epochs 30 --semantic_ids_path ./data/semantic_ids_kmeans.json --checkpoint_dir ./data/tiger_kmeans_checkpoints --tb_log_dir ./data/tensorboard/tiger_kmeans
+PYTHONPATH=src python examples/train_tiger.py --dataset sports --epochs 30 --semantic_ids_path ./data/semantic_ids_kmeans_sports.json
 ```
 
-### 3. Monitoring with TensorBoard
-Training runs automatically log to `./data/tensorboard/`. Monitor progress by running:
+### 3. Automated Benchmark Suite
+To run all experiments (semantic ID generation, HSTU training, TIGER VAE, and TIGER KMeans) across all Amazon/Steam datasets sequentially:
+```bash
+PYTHONPATH=src python examples/run_all_experiments.py
+```
+
+### 4. Monitoring Progress
+We support batch-step metrics tracking. Launch TensorBoard to inspect train loss, validation metric curves, and benchmarks:
 ```bash
 tensorboard --logdir ./data/tensorboard
 ```
