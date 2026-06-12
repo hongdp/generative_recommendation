@@ -33,13 +33,26 @@ PYTHONPATH=src pytest
   * `models/`: Implementations of `HSTUModel`, `TransformerModel`, `TIGERModel`, and `RQVAE`.
   * `evaluation/`: Evaluator components computing standard ranking metrics: Hit Rate (HR@K), Normalized Discounted Cumulative Gain (NDCG@K), and Mean Reciprocal Rank (MRR).
 * `examples/`: Train & evaluation runner scripts.
-  * `train_hstu.py`: Generic runner for index-based sequential architectures (`--model hstu` or `--model transformer`).
-  * `train_rqvae.py` / `train_rqkmeans.py`: Semantic ID generation scripts using deep autoencoders or fast clustering.
-  * `train_tiger.py`: Runner for generative retrieval recommendation.
-  * `run_all_experiments.py`: Script to automate ID generation, training, and evaluation across Beauty, Sports, Toys, and Steam datasets.
+  * **Index-Based Models**:
+    * `train_hstu.py`: Generic runner for index-based sequential architectures (`--model hstu` or `--model transformer`).
+  * **Semantic ID Generation**:
+    * `train_rqvae.py` / `train_rqkmeans.py`: Semantic ID generation scripts using deep autoencoders or fast clustering.
+  * **Generative Discrete Models (TIGER family)**:
+    * `train_tiger.py`: Standard TIGER model.
+    * `train_tiger_seq2seq.py`: TIGER using standard encoder-decoder seq2seq architecture.
+    * `train_tiger_cot.py`: TIGER with Chain-of-Thought reasoning.
+    * `train_tiger_rl_cot.py`: TIGER CoT fine-tuned via Reinforcement Learning.
+    * `train_tiger_encoder_ce.py`: **Ablation Model** testing TIGER encoder with direct CE projection instead of 3-level decoding.
+  * **Generative Continuous Models (Flow Matching)**:
+    * `train_hstu_flow.py`: Base Flow Matching framework on top of HSTU representations.
+    * `train_hstu_flow_ce.py`: Flow Matching with Contrastive Cross-Entropy auxiliary loss.
+    * `train_hstu_flow_t5_vae.py`: Flow Matching targeting T5 latent space via VAE.
+    * `train_tiger_flow.py`: Flow Matching targeting TIGER embedding spaces.
+  * **Batch Scripts**:
+    * `run_all_experiments.py`: Script to automate ID generation, training, and evaluation across Amazon and Steam datasets.
 * `SKILL.md`: Documented JAX/Flax development guidelines, memory-efficient training rules, and experience log.
 * `experiment_results.md`: Complete comparative baseline records of all experiments.
-* `tasks.md`: Project roadmap and backlog task status.
+* `walkthrough.md`: Detailed analysis and destructive testing conclusions (e.g. Random IDs vs RQVAE IDs).
 
 ---
 

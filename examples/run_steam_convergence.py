@@ -45,6 +45,27 @@ def main():
         f"--checkpoint_dir ./data/tiger_kmeans_steam_convergence_checkpoints --tb_log_dir ./data/tensorboard/tiger_kmeans_steam_convergence"
     )
 
+    # 4. TIGER Seq2Seq Model (VAE Semantic IDs)
+    run_cmd(
+        f"python examples/train_tiger_seq2seq.py --dataset {dataset} --epochs {epochs} --patience {patience} "
+        f"--semantic_ids_path ./data/semantic_ids_{dataset}.json "
+        f"--checkpoint_dir ./data/tiger_seq2seq_steam_checkpoints --tb_log_dir ./data/tensorboard/tiger_seq2seq_steam"
+    )
+
+    # 5. Direct-Embedding Transformer
+    run_cmd(
+        f"python examples/train_hstu.py --model transformer --dataset {dataset} --epochs {epochs} --patience {patience} "
+        f"--embedding_dim 384 --num_blocks 4 --num_heads 6 "
+        f"--checkpoint_dir ./data/transformer_steam_checkpoints --tb_log_dir ./data/tensorboard/transformer_steam"
+    )
+
+    # 6. TIGER Joint V2 (End-to-End Alternating Indexing)
+    run_cmd(
+        f"python examples/train_tiger_joint.py --dataset {dataset} --epochs {epochs} --patience {patience} "
+        f"--hstu_checkpoint ./data/hstu_steam_convergence_checkpoints/best_checkpoint.msgpack "
+        f"--checkpoint_dir ./data/tiger_joint_steam_checkpoints --tb_log_dir ./data/tensorboard/tiger_joint_steam"
+    )
+
     print("\n--- Steam Full Convergence Suite Completed Successfully! ---")
     print("All results are documented in experiment_results.md and logged to TensorBoard.")
 
