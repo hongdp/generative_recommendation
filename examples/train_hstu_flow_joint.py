@@ -26,63 +26,7 @@ from datasets import MovieLensDataLoader, AmazonDataLoader, SteamDataLoader
 from models.hstu import HSTUModel, HSTUBlock
 from models.tiger_flow import FlowHead, sinusoidal_embedding
 from evaluation.metrics import compute_ranks_from_predictions, calculate_metrics_from_ranks
-
-
-class HSTUFlowModel(nn.Module):
-    """HSTU backbone + Flow Head for joint training.
-
-    The item embedding table is passed in externally (frozen).
-    Only the HSTU blocks and FlowHead are trainable.
-    """
-    embedding_dim: int = 256
-    num_blocks: int = 4
-    num_heads: int = 4
-    attention_dim: int = 128
-    linear_dim: int = 512
-    flow_hidden_dim: int = 512
-    attn_dropout_rate: float = 0.2
-    linear_dropout_rate: float = 0.2
-    max_sequence_len: int = 20
-
-    @nn.compact
-    def __call__(self, x_embedded, z_t, t, deterministic=True):
-        """Forward pass: encode history + predict velocity.
-
-        Args:
-            x_embedded: Embedded item sequence [batch, seq_len, emb_dim]
-                        (looked up externally from frozen embedding table)
-            z_t: Noisy target embedding [batch, emb_dim]
-            t: Timestep [batch]
-            deterministic: Whether to disable dropout
-
-        Returns:
-            v_hat: Predicted velocity [batch, emb_dim]
-        """
-        # HSTU encoder blocks
-        x = x_embedded
-        for i in range(self.num_blocks):
-            x = HSTUBlock(
-                attention_dim=self.attention_dim,
-                linear_dim=self.linear_dim,
-                num_heads=self.num_heads,
-                attn_dropout_rate=self.attn_dropout_rate,
-                linear_dropout_rate=self.linear_dropout_rate,
-                enable_relative_attention_bias=True,
-                max_sequence_len=self.max_sequence_len,
-                name=f"hstu_block_{i}",
-            )(x, deterministic=deterministic)
-
-        # User representation = last position
-        h_user = x[:, -1, :]  # [batch, emb_dim]
-
-        # Flow head: predict velocity
-        v_hat = FlowHead(
-            hidden_dim=self.flow_hidden_dim,
-            output_dim=self.embedding_dim,
-            name="flow_head",
-        )(h_user, z_t, t)
-
-        return v_hat
+from models.hstu_flow import HSTUFlowModel
 
 
 def main():

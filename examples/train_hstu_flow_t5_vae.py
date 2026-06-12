@@ -13,73 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 from datasets import MovieLensDataLoader, AmazonDataLoader, SteamDataLoader
 from models.hstu import HSTUBlock
 from models.tiger_flow import FlowHead
-
-class VAEEncoder(nn.Module):
-    latent_dim: int
-    hidden_dim: int = 512
-
-    @nn.compact
-    def __call__(self, x):
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        mu = nn.Dense(self.latent_dim)(x)
-        logvar = nn.Dense(self.latent_dim)(x)
-        return mu, logvar
-
-class VAEDecoder(nn.Module):
-    output_dim: int
-    hidden_dim: int = 512
-
-    @nn.compact
-    def __call__(self, z):
-        x = nn.Dense(self.hidden_dim)(z)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        out = nn.Dense(self.output_dim)(x)
-        return out
-
-class HSTUIDFlowModel(nn.Module):
-    vocab_size: int
-    latent_dim: int
-    num_blocks: int
-    num_heads: int
-    attention_dim: int
-    linear_dim: int
-    max_sequence_len: int
-    attn_dropout_rate: float = 0.2
-    linear_dropout_rate: float = 0.2
-
-    @nn.compact
-    def __call__(self, x_seq, z_t=None, t=None, deterministic=False):
-        # x_seq is [batch, seq_len] of item IDs
-        embed_layer = nn.Embed(num_embeddings=self.vocab_size, features=self.latent_dim, name="item_embedding")
-        x = embed_layer(x_seq)
-
-        # Apply HSTU blocks
-        for i in range(self.num_blocks):
-            x = HSTUBlock(
-                num_heads=self.num_heads,
-                attention_dim=self.attention_dim,
-                linear_dim=self.linear_dim,
-                attn_dropout_rate=self.attn_dropout_rate,
-                linear_dropout_rate=self.linear_dropout_rate,
-                max_sequence_len=self.max_sequence_len,
-                name=f"hstu_block_{i}",
-            )(x, deterministic=deterministic)
-
-        h_user = x[:, -1, :]  # [batch, latent_dim]
-
-        if z_t is not None and t is not None:
-            v_hat = FlowHead(
-                hidden_dim=self.latent_dim * 2,
-                output_dim=self.latent_dim,
-                name="flow_head",
-            )(h_user, z_t, t)
-            return v_hat
-        return h_user
+from models.hstu_flow import HSTUIDFlowModel, VAEEncoder, VAEDecoder
 
 def main():
     parser = argparse.ArgumentParser(description="HSTU + Fixed T5 + VAE Compression")
