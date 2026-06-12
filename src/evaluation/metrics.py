@@ -15,8 +15,8 @@ def compute_ranks(
 ) -> Union[np.ndarray, jnp.ndarray]:
     """Computes the 1-based rank of the target items given scores for each item/candidate.
 
-    Optimistic ranking is used (items with scores strictly greater than the target
-    score are ranked above it).
+    Expected ranking is used to handle ties fairly (items with identical scores
+    to the target share the rank mass uniformly).
 
     Args:
         scores: array of shape (batch_size, num_items) containing predictions.
@@ -35,8 +35,12 @@ def compute_ranks(
     # target_scores shape: (batch_size, 1)
     target_scores = scores[batch_indices, targets][:, xp.newaxis]
 
-    # Rank = (number of scores strictly greater than target_score) + 1
-    ranks = xp.sum(scores > target_scores, axis=1) + 1
+    # Expected ranking is used to handle ties fairly
+    # Rank = (number of scores strictly greater) + (number of equal scores + 1) / 2
+    num_greater = xp.sum(scores > target_scores, axis=1)
+    num_equal = xp.sum(scores == target_scores, axis=1)
+    
+    ranks = num_greater + (num_equal + 1.0) / 2.0
     return ranks
 
 
