@@ -97,7 +97,17 @@ To run all experiments (semantic ID generation, HSTU training, TIGER VAE, and TI
 PYTHONPATH=src python examples/run_all_experiments.py
 ```
 
-### 4. Monitoring Progress
+### 4. ☁️ Cloud TPU Distributed Training
+For high-speed training on large datasets using Google Cloud TPU v5p or v5e (e.g. `v5p-8` or `v5litepod-8`), the repository supports automated 8-core data parallelism via `jax.pmap`. 
+
+Use the provided bash scripts to provision a TPU VM, sync data, run all 4 ablation experiments (`batch_size=2048`), and stream TensorBoard logs to your local machine in real-time:
+```bash
+# Provision TPU and launch experiments (Warning: TPU will persist until manually stopped)
+./scripts/run_on_tpu.sh
+```
+*Note on TPU Lifecycle: NEVER `delete` the TPU unless you are abandoning the instance forever. Always `stop` the TPU via `gcloud compute tpus tpu-vm stop <name>` to pause billing while preserving your 1.2GB Steam dataset and JAX environment on the persistent disk!*
+
+### 5. Monitoring Progress
 We support batch-step metrics tracking. Launch TensorBoard to inspect train loss, validation metric curves, and benchmarks:
 ```bash
 tensorboard --logdir ./data/tensorboard

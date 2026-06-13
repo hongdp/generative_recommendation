@@ -89,3 +89,10 @@ Adhere to the following guidelines when tracking project items in `tasks.md`:
 - **Order of Execution**: Execute backlog tasks sequentially in the order of their definition to preserve dependencies.
 - **Resource Constraints**: If system constraints (such as GPU memory or disk space) prevent execution, explicitly move and document the task under the "Skipped / Rejected / Insufficient Resources" section with clear reasoning.
 - **Subtask Granularity**: Break down high-level milestone goals (e.g., Task 3) into distinct, trackable sub-items (e.g., Task 3.1, Task 3.2) during planning to improve granularity and progress visibility.
+
+## 10. Cloud TPU Lifecycle Management
+
+When operating Cloud TPU VMs (e.g., `v5litepod-8`, `v4-8`, `v5p-8`) on Google Cloud, it is critical to distinguish between stopping and deleting the instances to preserve valuable datasets and environments while controlling costs.
+
+- **NEVER DELETE** an active experimental TPU unless the project is permanently concluded. Deleting a TPU (`gcloud compute tpus tpu-vm delete`) destroys the persistent disk, wiping out the JAX environment, code, and large datasets (e.g., the 1.2GB Steam reviews).
+- **ALWAYS STOP** the TPU when training is paused (e.g., overnight or between experiments). Stopping the TPU (`gcloud compute tpus tpu-vm stop`) releases the expensive accelerators back to the pool and stops compute billing, but preserves the persistent disk and all data for immediate resumption.
