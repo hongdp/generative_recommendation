@@ -179,8 +179,11 @@ def main():
     optimizer = optax.adamw(learning_rate=args.learning_rate, weight_decay=args.weight_decay)
     opt_state = optimizer.init(params)
 
+    params = replicate(params)
+    opt_state = replicate(opt_state)
+
     # 5. Define training step
-    @jax.jit
+    @jax.pmap(axis_name="batch")
     def train_step(params, opt_state, batch_enc, batch_dec_in, batch_dec_tar, dropout_key):
         def loss_fn(p):
             logits = model.apply(
@@ -195,6 +198,8 @@ def main():
             return jnp.mean(loss_vals)
 
         loss, grads = jax.value_and_grad(loss_fn)(params)
+        loss = lax.pmean(loss, axis_name="batch")
+        grads = lax.pmean(grads, axis_name="batch")
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss
@@ -292,15 +297,11 @@ def main():
     semantic_id_to_item = {tuple(v): k for k, v in semantic_ids.items()}
     evaluator = Evaluator(k_list=[1, 5, 10, 20])
 
-    def decode_fn(batch_in):
-        return beam_search_decode(params_ref[0], batch_in, B=beam_size)
-
-    # Mutable reference so decode_fn always uses current params
-    params_ref = [params]
-
     # 9. Resume training setup
     writer = None
     if args.tb_log_dir and not args.eval_only:
+        from flax.jax_utils import replicate, unreplicate
+        from flax.training.common_utils import shard
         from torch.utils.tensorboard import SummaryWriter
         writer = SummaryWriter(log_dir=args.tb_log_dir)
         print(f"TensorBoard logging enabled. Logs saved to {args.tb_log_dir}")
@@ -310,22 +311,23 @@ def main():
 
     if args.resume_path:
         print(f"Loading checkpoint from {args.resume_path}...")
-        checkpoint_state = load_checkpoint(args.resume_path, params, opt_state)
-        params = checkpoint_state["params"]
-        params_ref[0] = params
-        opt_state = checkpoint_state["opt_state"]
+        checkpoint_state = load_checkpoint(args.resume_path, unreplicate(params), unreplicate(opt_state))
+        params = replicate(checkpoint_state["params"])
+        opt_state = replicate(checkpoint_state["opt_state"])
         start_epoch = checkpoint_state["epoch"] + 1
         early_stopper.best_metrics["NDCG@10"] = float(checkpoint_state["best_val_ndcg"])
-        early_stopper.best_params = params
+        early_stopper.best_params = unreplicate(params)
         print(f"Resumed from epoch {checkpoint_state['epoch']} with best validation NDCG@10 = {checkpoint_state['best_val_ndcg']:.5f}")
 
     if args.eval_only:
         if not args.resume_path:
             raise ValueError("Must specify --resume_path when using --eval_only.")
         print("\nRunning test evaluation only...")
-        params_ref[0] = early_stopper.best_params if early_stopper.best_params is not None else params
+        best_params = early_stopper.best_params if early_stopper.best_params is not None else unreplicate(params)
+        def test_predict(batch_inputs):
+            return beam_search_decode(best_params, jnp.array(batch_inputs), B=beam_size)
         test_results = evaluator.evaluate_generative_discrete(
-            decode_fn, semantic_id_to_item, test_enc_in, test_tar,
+            test_predict, semantic_id_to_item, test_enc_in, test_tar,
             beam_size=beam_size, batch_size=args.batch_size,
         )
         print("\n--- Test Evaluation Results ---")
@@ -358,25 +360,27 @@ def main():
             if i + batch_size > num_samples:
                 break
                 
-            batch_enc = shuffled_enc_in[i : i + batch_size]
-            batch_dec_in = shuffled_dec_in[i : i + batch_size]
-            batch_dec_tar = shuffled_dec_tar[i : i + batch_size]
+            batch_enc = shard(jnp.array(shuffled_enc_in[i : i + batch_size]))
+            batch_dec_in = shard(jnp.array(shuffled_dec_in[i : i + batch_size]))
+            batch_dec_tar = shard(jnp.array(shuffled_dec_tar[i : i + batch_size]))
+            
             epoch_rng, step_rng = jax.random.split(epoch_rng)
+            step_rngs = jax.random.split(step_rng, jax.local_device_count())
             
             params, opt_state, loss_val = train_step(
                 params,
                 opt_state,
-                jnp.array(batch_enc),
-                jnp.array(batch_dec_in),
-                jnp.array(batch_dec_tar),
-                step_rng
+                batch_enc,
+                batch_dec_in,
+                batch_dec_tar,
+                step_rngs
             )
-            epoch_loss += loss_val
+            epoch_loss += float(loss_val[0])
             num_batches_processed += 1
             global_step += 1
 
             if writer is not None and global_step % 10 == 0:
-                writer.add_scalar("Loss/train_step", float(loss_val), global_step)
+                writer.add_scalar("Loss/train_step", float(loss_val[0]), global_step)
 
         elapsed = time.time() - start_time
         avg_loss = float(epoch_loss) / num_batches_processed
@@ -387,9 +391,12 @@ def main():
 
         # Evaluate on validation split every epoch
         print(f"Evaluating validation split at epoch {epoch}...")
-        params_ref[0] = params
+        val_params = unreplicate(params)
+        def val_predict(batch_inputs):
+            return beam_search_decode(val_params, jnp.array(batch_inputs), B=beam_size)
+            
         val_results = evaluator.evaluate_generative_discrete(
-            decode_fn, semantic_id_to_item, val_enc_in, val_tar,
+            val_predict, semantic_id_to_item, val_enc_in, val_tar,
             beam_size=beam_size, batch_size=args.batch_size,
         )
         val_ndcg = val_results["NDCG@10"]
@@ -401,11 +408,11 @@ def main():
             for metric, score in val_results.items():
                 writer.add_scalar(f"Val/{metric}", score, global_step)
 
-        improved = early_stopper.check(val_results, params)
+        improved = early_stopper.check(val_results, unreplicate(params))
         if improved:
             print(">>> New best validation score! Saving checkpoint...")
             ckpt_path = save_checkpoint(
-                params, opt_state, epoch,
+                unreplicate(params), unreplicate(opt_state), epoch,
                 early_stopper.get_best("NDCG@10"),
                 args.checkpoint_dir,
             )
@@ -416,18 +423,19 @@ def main():
 
         # Save latest checkpoint
         save_checkpoint(
-            params, opt_state, epoch,
+            unreplicate(params), unreplicate(opt_state), epoch,
             early_stopper.get_best("NDCG@10"),
             args.checkpoint_dir, filename="latest_checkpoint.msgpack",
         )
 
     # 11. Final Test evaluation using best checkpoint
-    best_params = early_stopper.best_params if early_stopper.best_params is not None else params
-    params_ref[0] = best_params
+    best_params = early_stopper.best_params if early_stopper.best_params is not None else unreplicate(params)
 
     print("\nRunning final test evaluation...")
+    def test_predict(batch_inputs):
+        return beam_search_decode(best_params, jnp.array(batch_inputs), B=beam_size)
     test_results = evaluator.evaluate_generative_discrete(
-        decode_fn, semantic_id_to_item, test_enc_in, test_tar,
+        test_predict, semantic_id_to_item, test_enc_in, test_tar,
         beam_size=beam_size, batch_size=args.batch_size,
     )
 

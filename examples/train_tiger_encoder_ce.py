@@ -142,8 +142,12 @@ def main():
     optimizer = optax.adamw(learning_rate=args.learning_rate, weight_decay=args.weight_decay)
     opt_state = optimizer.init(params)
 
+    # Replicate for pmap
+    params = replicate(params)
+    opt_state = replicate(opt_state)
+
     # 5. Training step
-    @jax.jit
+    @jax.pmap(axis_name="batch")
     def train_step(params, opt_state, batch_enc, batch_tar, dropout_key):
         def loss_fn(p):
             logits = model.apply(
@@ -156,13 +160,15 @@ def main():
             return jnp.mean(loss_vals)
 
         loss, grads = jax.value_and_grad(loss_fn)(params)
+        loss = lax.pmean(loss, axis_name="batch")
+        grads = lax.pmean(grads, axis_name="batch")
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss
 
-    # 6. Prediction function for evaluation
-    @jax.jit
-    def predict_batch(params, batch_enc):
+    # 6. Evaluation predict function
+    @jax.pmap
+    def predict_step(params, batch_enc):
         logits = model.apply({"params": params}, batch_enc, deterministic=True)
         return logits
 
@@ -172,7 +178,6 @@ def main():
     # 8. Training loop
     writer = None
     if args.tb_log_dir:
-        from torch.utils.tensorboard import SummaryWriter
         writer = SummaryWriter(log_dir=args.tb_log_dir)
         print(f"TensorBoard: {args.tb_log_dir}")
 
@@ -201,13 +206,27 @@ def main():
             batch_tar = jnp.array(shuffled_tar[i:i+batch_size])
             epoch_rng, step_rng = jax.random.split(epoch_rng)
 
-            params, opt_state, loss_val = train_step(params, opt_state, batch_enc, batch_tar, step_rng)
-            epoch_loss += loss_val
+            # Shard data across devices: (batch, ...) -> (num_devices, batch/num_devices, ...)
+            batch_enc_sharded = shard(batch_enc)
+            batch_tar_sharded = shard(batch_tar)
+            
+            # Since step_rng needs to be unique per device, we can split it
+            step_rngs = jax.random.split(step_rng, jax.local_device_count())
+
+            params, opt_state, loss_val = train_step(
+                params,
+                opt_state,
+                batch_enc_sharded,
+                batch_tar_sharded,
+                step_rngs
+            )
+            # loss_val is now replicated across devices, just take the first one
+            epoch_loss += float(loss_val[0])
             num_batches += 1
             global_step += 1
 
             if writer is not None and global_step % 10 == 0:
-                writer.add_scalar("Loss/train_step", float(loss_val), global_step)
+                writer.add_scalar("Loss/train_step", float(loss_val[0]), global_step)
 
         elapsed = time.time() - start_time
         avg_loss = float(epoch_loss) / num_batches
@@ -219,7 +238,19 @@ def main():
         # Evaluate on validation split
         print(f"Evaluating validation split at epoch {epoch}...")
         def val_predict(batch_inputs):
-            return predict_batch(params, jnp.array(batch_inputs))
+            # Re-pad to be divisible by device_count if necessary
+            num_devices = jax.local_device_count()
+            pad_amount = (num_devices - (len(batch_inputs) % num_devices)) % num_devices
+            if pad_amount > 0:
+                batch_inputs = np.pad(batch_inputs, ((0, pad_amount), (0, 0)), mode="constant")
+            
+            batch_enc_sharded = shard(jnp.array(batch_inputs))
+            preds_sharded = predict_step(params, batch_enc_sharded)
+            # Unshard predictions
+            preds = preds_sharded.reshape((-1, preds_sharded.shape[-1]))
+            if pad_amount > 0:
+                preds = preds[:-pad_amount]
+            return preds
 
         val_results = evaluator.evaluate_index_based(
             val_predict, val_enc_in, val_tar, batch_size=batch_size,
@@ -236,12 +267,18 @@ def main():
         improved = early_stopper.check(val_results, params)
         if improved:
             print(">>> New best! Saving checkpoint...")
-            ckpt_path = save_checkpoint(
-                params, opt_state, epoch,
+            params_to_save = unreplicate(params)
+            opt_state_to_save = unreplicate(opt_state)
+            
+            checkpoint_path = save_checkpoint(
+                params_to_save,
+                opt_state_to_save,
+                epoch,
                 early_stopper.get_best("NDCG@10"),
                 args.checkpoint_dir,
+                "best_checkpoint.msgpack",
             )
-            print(f"Checkpoint saved to {ckpt_path}")
+            print(f"Checkpoint saved to {checkpoint_path}")
         elif early_stopper.should_stop:
             print(f"\nEarly stopping triggered at epoch {epoch}.")
             break
@@ -254,11 +291,21 @@ def main():
 
     # 9. Final test evaluation
     best_params = early_stopper.best_params if early_stopper.best_params is not None else params
+    num_devices = jax.local_device_count()
 
-    def test_predict(batch_inputs):
-        return predict_batch(best_params, jnp.array(batch_inputs))
-
+    # 9. Test Evaluation
     print("\nRunning final test evaluation...")
+    def test_predict(batch_inputs):
+        pad_amount = (num_devices - (len(batch_inputs) % num_devices)) % num_devices
+        if pad_amount > 0:
+            batch_inputs = np.pad(batch_inputs, ((0, pad_amount), (0, 0)), mode="constant")
+        batch_enc_sharded = shard(jnp.array(batch_inputs))
+        preds_sharded = predict_step(best_params, batch_enc_sharded)
+        preds = preds_sharded.reshape((-1, preds_sharded.shape[-1]))
+        if pad_amount > 0:
+            preds = preds[:-pad_amount]
+        return preds
+
     test_results = evaluator.evaluate_index_based(
         test_predict, test_enc_in, test_tar, batch_size=batch_size,
     )
