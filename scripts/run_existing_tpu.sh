@@ -19,11 +19,11 @@ gcloud compute tpus tpu-vm scp --recurse --zone=$ZONE \
     src examples scripts pyproject.toml README.md experiment_results.md \
     $INSTANCE_NAME:$REMOTE_DIR/
 
-# Copy necessary data
-gcloud compute tpus tpu-vm scp --recurse --zone=$ZONE \
-    data/semantic_ids*.json \
-    data/steam \
-    $INSTANCE_NAME:$REMOTE_DIR/data/ 2>/dev/null || true
+# Skip copying heavy datasets
+# gcloud compute tpus tpu-vm scp --recurse --zone=$ZONE \
+#     data/semantic_ids*.json \
+#     data/steam \
+#     $INSTANCE_NAME:$REMOTE_DIR/data/ 2>/dev/null || true
 
 echo "=========================================="
 echo "EXECUTION & REAL-TIME MONITORING"

@@ -15,7 +15,8 @@ class TIGEREncoderCEModel(nn.Module):
     """TIGER encoder + item embedding CE prediction head."""
     num_items: int
     vocab_size: int
-    embedding_dim: int = 384
+    encoder_dim: int = 384
+    item_embedding_dim: int = 384
     num_blocks: int = 4
     num_heads: int = 6
     attention_dim: int = 384
@@ -42,7 +43,7 @@ class TIGEREncoderCEModel(nn.Module):
         # 1. TIGER encoder
         encoder = TIGERSeq2SeqModel(
             vocab_size=self.vocab_size,
-            embedding_dim=self.embedding_dim,
+            embedding_dim=self.encoder_dim,
             num_blocks=self.num_blocks,
             num_heads=self.num_heads,
             attention_dim=self.attention_dim,
@@ -63,17 +64,17 @@ class TIGEREncoderCEModel(nn.Module):
         pooled = jnp.sum(enc_out * mask[:, :, None], axis=1) / mask_sum  # [batch, embedding_dim]
 
         # 3. Projection head
-        h = nn.Dense(self.embedding_dim, name="proj_1")(pooled)
+        h = nn.Dense(self.encoder_dim, name="proj_1")(pooled)
         h = nn.gelu(h)
-        h = nn.Dense(self.embedding_dim, name="proj_2")(h)
+        h = nn.Dense(self.item_embedding_dim, name="proj_2")(h)
 
         # 4. Item embedding table
         item_embeddings = nn.Embed(
             num_embeddings=self.num_items + 1,
-            features=self.embedding_dim,
+            features=self.item_embedding_dim,
             name="item_embedding",
         )(jnp.arange(self.num_items + 1))
-        # item_embeddings: [num_items + 1, embedding_dim]
+        # item_embeddings: [num_items + 1, item_embedding_dim]
 
         # 5. Dot product logits
         logits = h @ item_embeddings.T  # [batch, num_items + 1]

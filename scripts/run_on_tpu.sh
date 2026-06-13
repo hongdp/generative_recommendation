@@ -117,6 +117,7 @@ mkdir -p ./tpu_sync
 gcloud compute tpus tpu-vm scp --recurse --zone=$ZONE \
     $INSTANCE_NAME:$REMOTE_DIR/data/*_checkpoints \
     $INSTANCE_NAME:$REMOTE_DIR/data/tensorboard \
+    $INSTANCE_NAME:$REMOTE_DIR/experiment_results.md \
     ./tpu_sync/ || echo "Warning: Sync down failed."
 
 if [ $TRAIN_EXIT_CODE -ne 0 ]; then

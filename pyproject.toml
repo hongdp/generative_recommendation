@@ -23,6 +23,7 @@ dependencies = [
     "tokenizers",
     "tqdm",
     "grain",
+    "tensorboardX",
 ]
 
 [project.optional-dependencies]

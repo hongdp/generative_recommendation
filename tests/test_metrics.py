@@ -37,13 +37,13 @@ def test_metrics_calculation():
     # ranks: 1, 3, 5, 12
     ranks = np.array([1, 3, 5, 12])
 
-    # HR@5: 1, 3, 5 are <= 5 (3 out of 4) -> 0.75
-    # HR@1: 1 is <= 1 (1 out of 4) -> 0.25
+    # HR_5: 1, 3, 5 are <= 5 (3 out of 4) -> 0.75
+    # HR_1: 1 is <= 1 (1 out of 4) -> 0.25
     assert hit_rate_at_k(ranks, k=5) == 0.75
     assert hit_rate_at_k(ranks, k=1) == 0.25
     assert hit_rate_at_k(ranks, k=10) == 0.75
 
-    # NDCG@5:
+    # NDCG_5:
     # rank 1: 1 / log2(2) = 1.0
     # rank 3: 1 / log2(4) = 0.5
     # rank 5: 1 / log2(6) = 0.38685

@@ -7,13 +7,13 @@ echo "Starting TPU Experiments..."
 echo "=============================="
 echo "Experiment 1: TIGER Random IDs"
 echo "=============================="
-PYTHONPATH=src python examples/train_tiger_seq2seq.py \
-    --dataset steam \
-    --semantic_ids_path ./data/semantic_ids_random_steam.json \
-    --checkpoint_dir ./data/tpu_tiger_random_checkpoints \
-    --tb_log_dir ./data/tensorboard/tpu_tiger_random \
-    --batch_size 2048 \
-    --epochs 30
+# PYTHONPATH=src python examples/train_tiger_seq2seq.py \
+#     --dataset steam \
+#     --semantic_ids_path ./data/semantic_ids_random_steam.json \
+#     --checkpoint_dir ./data/tpu_tiger_random_checkpoints \
+#     --tb_log_dir ./data/tensorboard/tpu_tiger_random \
+#     --batch_size 2048 \
+#     --epochs 30
 
 # 2. TIGER RQ-VAE
 echo "=============================="
@@ -47,7 +47,8 @@ echo "=============================="
 PYTHONPATH=src python examples/train_tiger_encoder_ce.py \
     --dataset steam \
     --semantic_ids_path ./data/semantic_ids_rqvae_steam.json \
-    --embedding_dim 1536 \
+    --embedding_dim 384 \
+    --item_embedding_dim 1536 \
     --checkpoint_dir ./data/tpu_tiger_ce_1536_checkpoints \
     --tb_log_dir ./data/tensorboard/tpu_tiger_ce_1536 \
     --batch_size 256 \

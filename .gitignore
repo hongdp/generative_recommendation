@@ -42,6 +42,10 @@ env/
 venv/
 ENV/
 
+# Local configurations
+*.local.yaml
+*.local.json
+
 # IDE / System files
 .vscode/
 .idea/

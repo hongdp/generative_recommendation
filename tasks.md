@@ -9,7 +9,7 @@ This document tracks subsequent tasks and their progress.
 
 ## Backlog
 
-- [ ] **Task 0**: Replicate full-scale HSTU results on MovieLens-1M (Paused at Epoch 14, Best Val NDCG@10 = 0.16485)
+- [ ] **Task 0**: Replicate full-scale HSTU results on MovieLens-1M (Paused at Epoch 14, Best Val NDCG_10 = 0.16485)
 - [x] **Task 1**: Replicate full-scale TIGER results on MovieLens-1M 
     - [x] **Task 1.1**: Implement and train RQVAE for Semantic ID used in TIGER.
     - [x] **Task 1.2**: Implement and Train TIGER model
@@ -21,7 +21,7 @@ This document tracks subsequent tasks and their progress.
 - [x] **Task 4**: Rename `examples/train_full_movielens.py` to `examples/train_hstu.py` and update all imports and references.
 - [/] **Task 5**: Train and evaluate HSTU, TIGER (VAE), and TIGER (K-Means) to full convergence on the Steam dataset.
     - [x] **Task 5.1**: Add `--patience` command-line argument to training runners.
-    - [x] **Task 5.2**: Implement path validity metrics (Valid@1 and Valid@Beam) for TIGER TensorBoard logging.
+    - [x] **Task 5.2**: Implement path validity metrics (Valid_1 and Valid_Beam) for TIGER TensorBoard logging.
     - [/] **Task 5.3**: Execute the Steam convergence sweep.
 
 ## Skipped / Rejected / Insufficient Resources

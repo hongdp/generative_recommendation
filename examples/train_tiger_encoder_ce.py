@@ -10,8 +10,10 @@ import argparse
 import os
 import json
 import time
+import functools
 import jax
 import jax.numpy as jnp
+from jax import lax
 import numpy as np
 import optax
 import flax.linen as nn
@@ -21,6 +23,9 @@ from models.tiger_seq2seq import TIGERSeq2SeqModel
 from models.tiger_encoder_ce import TIGEREncoderCEModel
 from evaluation.evaluator import Evaluator
 from evaluation.training_utils import EarlyStopper, save_checkpoint, load_checkpoint, log_results_to_markdown
+
+from flax.jax_utils import replicate, unreplicate
+from flax.training.common_utils import shard
 
 
 def sequence_to_tiger_tokens(item_seq, semantic_ids, K):
@@ -51,13 +56,15 @@ def sequence_to_tiger_tokens(item_seq, semantic_ids, K):
 def main():
     parser = argparse.ArgumentParser(description="TIGER Encoder + CE: Ablation study.")
     parser.add_argument("--checkpoint_dir", type=str, default="./data/tiger_encoder_ce_checkpoints")
+    parser.add_argument("--resume_path", type=str, default="", help="Path to checkpoint to resume training or evaluate.")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--tb_log_dir", type=str, default="./data/tensorboard/tiger_encoder_ce_steam")
     parser.add_argument("--semantic_ids_path", type=str, default="./data/semantic_ids.json")
     parser.add_argument("--dataset", type=str, default="steam",
         choices=["ml-1m", "beauty", "sports", "toys", "steam"])
     parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--embedding_dim", type=int, default=384)
+    parser.add_argument("--embedding_dim", type=int, default=384, help="Encoder dim (typically 384).")
+    parser.add_argument("--item_embedding_dim", type=int, default=384, help="KNN space dim.")
     parser.add_argument("--num_blocks", type=int, default=4)
     parser.add_argument("--num_heads", type=int, default=6)
     parser.add_argument("--attention_dim", type=int, default=384)
@@ -123,7 +130,8 @@ def main():
     model = TIGEREncoderCEModel(
         num_items=num_items,
         vocab_size=vocab_size,
-        embedding_dim=args.embedding_dim,
+        encoder_dim=args.embedding_dim,
+        item_embedding_dim=args.item_embedding_dim,
         num_blocks=args.num_blocks,
         num_heads=args.num_heads,
         attention_dim=args.attention_dim,
@@ -146,8 +154,8 @@ def main():
     params = replicate(params)
     opt_state = replicate(opt_state)
 
-    # 5. Training step
-    @jax.pmap(axis_name="batch")
+    # 5. Define training step
+    @functools.partial(jax.pmap, axis_name="batch")
     def train_step(params, opt_state, batch_enc, batch_tar, dropout_key):
         def loss_fn(p):
             logits = model.apply(
@@ -178,17 +186,40 @@ def main():
     # 8. Training loop
     writer = None
     if args.tb_log_dir:
+        from tensorboardX import SummaryWriter
         writer = SummaryWriter(log_dir=args.tb_log_dir)
         print(f"TensorBoard: {args.tb_log_dir}")
 
     early_stopper = EarlyStopper(patience=args.patience)
+    
+    start_epoch = 1
+    
+    # Auto-resume from latest checkpoint if resume_path not set
+    if not args.resume_path:
+        latest_ckpt = os.path.join(args.checkpoint_dir, "latest_checkpoint.msgpack")
+        if os.path.exists(latest_ckpt):
+            args.resume_path = latest_ckpt
+
+    if args.resume_path:
+        print(f"Loading checkpoint from {args.resume_path}...")
+        try:
+            checkpoint_state = load_checkpoint(args.resume_path, unreplicate(params), unreplicate(opt_state))
+            params = replicate(checkpoint_state["params"])
+            opt_state = replicate(checkpoint_state["opt_state"])
+            start_epoch = checkpoint_state["epoch"] + 1
+            early_stopper.best_metrics["NDCG@10"] = float(checkpoint_state["best_val_ndcg"])
+            early_stopper.best_params = unreplicate(params)
+            print(f"Resumed from epoch {checkpoint_state['epoch']} with best validation NDCG@10 = {checkpoint_state['best_val_ndcg']:.5f}")
+        except Exception as e:
+            print(f"Failed to load checkpoint: {e}. Starting from scratch.")
+
     batch_size = args.batch_size
     num_samples = len(train_tar)
     epoch_rng = jax.random.PRNGKey(777)
     global_step = 0
 
     print(f"\nTraining for {args.epochs} epochs...")
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         indices = np.arange(num_samples)
         np.random.shuffle(indices)
         shuffled_enc_in = train_enc_in[indices]

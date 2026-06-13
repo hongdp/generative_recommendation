@@ -96,3 +96,9 @@ When operating Cloud TPU VMs (e.g., `v5litepod-8`, `v4-8`, `v5p-8`) on Google Cl
 
 - **NEVER DELETE** an active experimental TPU unless the project is permanently concluded. Deleting a TPU (`gcloud compute tpus tpu-vm delete`) destroys the persistent disk, wiping out the JAX environment, code, and large datasets (e.g., the 1.2GB Steam reviews).
 - **ALWAYS STOP** the TPU when training is paused (e.g., overnight or between experiments). Stopping the TPU (`gcloud compute tpus tpu-vm stop`) releases the expensive accelerators back to the pool and stops compute billing, but preserves the persistent disk and all data for immediate resumption.
+
+## 11. Data Safety and File Modification Protocol
+**CRITICAL WARNING FOR AI AGENTS:** 
+Never perform in-place byte/text replacement using Python one-liners like `open(f, 'wb').write(open(f, 'rb').read()...)` without first creating a backup of the target directory! The python evaluation order will truncate the file to 0 bytes before reading it, causing catastrophic and irreversible data loss.
+- **Rule**: ALWAYS copy the target files/directories to a `_backup` folder before attempting any batch modification (especially for non-versioned data like TensorBoard logs, model checkpoints, or raw datasets).
+- **Rule**: Verify the modification script on a single dummy file first.

@@ -4,11 +4,15 @@ import argparse
 import os
 import json
 import time
+import functools
 import jax
 import jax.numpy as jnp
+from jax import lax
 import numpy as np
 import optax
 import flax.serialization
+from flax.jax_utils import replicate, unreplicate
+from flax.training.common_utils import shard
 
 from datasets import MovieLensDataLoader, AmazonDataLoader, SteamDataLoader
 from models.tiger_seq2seq import TIGERSeq2SeqModel
@@ -183,7 +187,7 @@ def main():
     opt_state = replicate(opt_state)
 
     # 5. Define training step
-    @jax.pmap(axis_name="batch")
+    @functools.partial(jax.pmap, axis_name="batch")
     def train_step(params, opt_state, batch_enc, batch_dec_in, batch_dec_tar, dropout_key):
         def loss_fn(p):
             logits = model.apply(
@@ -225,6 +229,26 @@ def main():
             deterministic=True,
         )
 
+    @jax.jit
+    def predict_dec_step_beams(params, decoder_tokens_beams, encoder_outputs, encoder_tokens):
+        # Vectorize across the beam dimension (axis 1)
+        # decoder_tokens_beams: [batch_size, B, dec_len]
+        # encoder_outputs: [batch_size, enc_len, dim]
+        # encoder_tokens: [batch_size, enc_len]
+        vmap_fn = jax.vmap(
+            lambda dec: model.apply(
+                {"params": params},
+                dec,
+                encoder_outputs,
+                encoder_tokens,
+                method=model.decode_step,
+                deterministic=True,
+            ),
+            in_axes=1,
+            out_axes=1
+        )
+        return vmap_fn(decoder_tokens_beams)
+
     # 7. Batched Beam Search decoder
     def beam_search_decode(params, batch_enc_in, B=10):
         batch_size = len(batch_enc_in)
@@ -243,17 +267,11 @@ def main():
         top_tokens1 = top_indices + 1
 
         # Step 2: Decode Level 2 token (Batched across beams)
-        # Replicate context
-        enc_out2 = np.repeat(encoder_outputs, B, axis=0)
-        enc_in2 = np.repeat(batch_enc_in, B, axis=0)
+        dec_in2_start = jnp.ones((batch_size, B, 1), dtype=jnp.int32) * start_token
+        dec_in2 = jnp.concatenate([dec_in2_start, top_tokens1[:, :, None]], axis=-1) # [batch_size, B, 2]
         
-        # Replicate and append decoder inputs
-        dec_in2 = np.ones((batch_size * B, 1), dtype=np.int32) * start_token
-        dec_in2 = np.concatenate([dec_in2, top_tokens1.reshape(-1, 1)], axis=-1) # [batch_size * B, 2]
-        
-        logits2 = predict_dec_step(params, jnp.array(dec_in2), enc_out2, enc_in2)
-        log_probs2 = jax.nn.log_softmax(logits2[:, 257 : 513], axis=-1)  # [batch_size * B, 256]
-        log_probs2 = log_probs2.reshape(batch_size, B, 256)
+        logits2 = predict_dec_step_beams(params, dec_in2, encoder_outputs, batch_enc_in)
+        log_probs2 = jax.nn.log_softmax(logits2[:, :, 257 : 513], axis=-1)  # [batch_size, B, 256]
         
         # Cumulative probability
         cum_probs2 = top_probs[:, :, None] + log_probs2  # [batch_size, B, 256]
@@ -262,25 +280,21 @@ def main():
         
         beam_idx2 = top_flat_indices2 // 256
         c2 = top_flat_indices2 % 256
-        c1 = top_indices[np.arange(batch_size)[:, None], beam_idx2]
+        c1 = top_indices[jnp.arange(batch_size)[:, None], beam_idx2]
         
         top_tokens1_expanded = c1 + 1
         top_tokens2 = c2 + 257
 
         # Step 3: Decode Level 3 token
-        enc_out3 = np.repeat(encoder_outputs, B, axis=0)
-        enc_in3 = np.repeat(batch_enc_in, B, axis=0)
+        dec_in3_start = jnp.ones((batch_size, B, 1), dtype=jnp.int32) * start_token
+        dec_in3 = jnp.concatenate([
+            dec_in3_start,
+            top_tokens1_expanded[:, :, None],
+            top_tokens2[:, :, None]
+        ], axis=-1) # [batch_size, B, 3]
         
-        dec_in3 = np.ones((batch_size * B, 1), dtype=np.int32) * start_token
-        dec_in3 = np.concatenate([
-            dec_in3,
-            top_tokens1_expanded.reshape(-1, 1),
-            top_tokens2.reshape(-1, 1)
-        ], axis=-1) # [batch_size * B, 3]
-        
-        logits3 = predict_dec_step(params, jnp.array(dec_in3), enc_out3, enc_in3)
-        log_probs3 = jax.nn.log_softmax(logits3[:, 513 : 769], axis=-1)  # [batch_size * B, 256]
-        log_probs3 = log_probs3.reshape(batch_size, B, 256)
+        logits3 = predict_dec_step_beams(params, dec_in3, encoder_outputs, batch_enc_in)
+        log_probs3 = jax.nn.log_softmax(logits3[:, :, 513 : 769], axis=-1)  # [batch_size, B, 256]
         
         cum_probs3 = top_probs2[:, :, None] + log_probs3  # [batch_size, B, 256]
         cum_probs3 = cum_probs3.reshape(batch_size, -1)  # [batch_size, B * 256]
@@ -288,8 +302,8 @@ def main():
         
         beam_idx3 = top_flat_indices3 // 256
         c3 = top_flat_indices3 % 256
-        c2_final = c2[np.arange(batch_size)[:, None], beam_idx3]
-        c1_final = c1[np.arange(batch_size)[:, None], beam_idx3]
+        c2_final = c2[jnp.arange(batch_size)[:, None], beam_idx3]
+        c1_final = c1[jnp.arange(batch_size)[:, None], beam_idx3]
 
         return np.array(c1_final), np.array(c2_final), np.array(c3)
 
@@ -300,24 +314,33 @@ def main():
     # 9. Resume training setup
     writer = None
     if args.tb_log_dir and not args.eval_only:
-        from flax.jax_utils import replicate, unreplicate
-        from flax.training.common_utils import shard
-        from torch.utils.tensorboard import SummaryWriter
+        # Removed inline import to prevent UnboundLocalError
+        # Removed inline import to prevent UnboundLocalError
+        from tensorboardX import SummaryWriter
         writer = SummaryWriter(log_dir=args.tb_log_dir)
         print(f"TensorBoard logging enabled. Logs saved to {args.tb_log_dir}")
 
     start_epoch = 1
     early_stopper = EarlyStopper(patience=args.patience)
+    
+    # Auto-resume from latest checkpoint if resume_path not set
+    if not args.resume_path:
+        latest_ckpt = os.path.join(args.checkpoint_dir, "latest_checkpoint.msgpack")
+        if os.path.exists(latest_ckpt):
+            args.resume_path = latest_ckpt
 
     if args.resume_path:
         print(f"Loading checkpoint from {args.resume_path}...")
-        checkpoint_state = load_checkpoint(args.resume_path, unreplicate(params), unreplicate(opt_state))
-        params = replicate(checkpoint_state["params"])
-        opt_state = replicate(checkpoint_state["opt_state"])
-        start_epoch = checkpoint_state["epoch"] + 1
-        early_stopper.best_metrics["NDCG@10"] = float(checkpoint_state["best_val_ndcg"])
-        early_stopper.best_params = unreplicate(params)
-        print(f"Resumed from epoch {checkpoint_state['epoch']} with best validation NDCG@10 = {checkpoint_state['best_val_ndcg']:.5f}")
+        try:
+            checkpoint_state = load_checkpoint(args.resume_path, unreplicate(params), unreplicate(opt_state))
+            params = replicate(checkpoint_state["params"])
+            opt_state = replicate(checkpoint_state["opt_state"])
+            start_epoch = checkpoint_state["epoch"] + 1
+            early_stopper.best_metrics["NDCG@10"] = float(checkpoint_state["best_val_ndcg"])
+            early_stopper.best_params = unreplicate(params)
+            print(f"Resumed from epoch {checkpoint_state['epoch']} with best validation NDCG@10 = {checkpoint_state['best_val_ndcg']:.5f}")
+        except Exception as e:
+            print(f"Failed to load checkpoint: {e}. Starting from scratch.")
 
     if args.eval_only:
         if not args.resume_path:

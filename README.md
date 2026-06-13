@@ -31,7 +31,7 @@ PYTHONPATH=src pytest
 * `src/`: Core library modules.
   * `datasets/`: Preprocessing, sequence splitting, and data loading pipelines for **MovieLens-1M**, **Amazon (Beauty, Sports, Toys)**, and **Steam** datasets.
   * `models/`: Implementations of `HSTUModel`, `TransformerModel`, `TIGERModel`, and `RQVAE`.
-  * `evaluation/`: Evaluator components computing standard ranking metrics: Hit Rate (HR@K), Normalized Discounted Cumulative Gain (NDCG@K), and Mean Reciprocal Rank (MRR).
+  * `evaluation/`: Evaluator components computing standard ranking metrics: Hit Rate (HR_K), Normalized Discounted Cumulative Gain (NDCG_K), and Mean Reciprocal Rank (MRR).
 * `examples/`: Train & evaluation runner scripts.
   * **Index-Based Models**:
     * `train_hstu.py`: Generic runner for index-based sequential architectures (`--model hstu` or `--model transformer`).
