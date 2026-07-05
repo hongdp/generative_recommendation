@@ -4,6 +4,7 @@ Provides reusable components for early stopping, checkpointing, metric logging,
 and result documentation that are common across all training scripts.
 """
 
+import json
 import os
 import time
 from typing import Dict, Optional, Sequence, Set
@@ -75,6 +76,7 @@ def save_checkpoint(
     best_val_ndcg: float,
     checkpoint_dir: str,
     filename: str = "best_checkpoint.msgpack",
+    semantic_ids_hash: Optional[str] = None,
 ) -> str:
     """Saves a Flax checkpoint to disk.
 
@@ -85,6 +87,11 @@ def save_checkpoint(
         best_val_ndcg: best validation NDCG@10 so far.
         checkpoint_dir: directory to save the checkpoint.
         filename: checkpoint filename.
+        semantic_ids_hash: optional hash of the Semantic-ID assignment the model
+            is being trained on. When provided, a ``<filename>.meta.json`` sidecar
+            is written so that reloading against a mismatched (e.g. regenerated)
+            Semantic-ID file can be detected instead of silently decoding into the
+            wrong code space.
 
     Returns:
         The full path to the saved checkpoint.
@@ -99,7 +106,60 @@ def save_checkpoint(
     }
     with open(checkpoint_path, "wb") as f:
         f.write(flax.serialization.to_bytes(checkpoint_state))
+    if semantic_ids_hash is not None:
+        with open(checkpoint_path + ".meta.json", "w") as f:
+            json.dump({"semantic_ids_hash": semantic_ids_hash, "epoch": epoch}, f)
     return checkpoint_path
+
+
+def read_checkpoint_meta(checkpoint_path: str) -> dict:
+    """Reads the ``<checkpoint>.meta.json`` sidecar, or ``{}`` if absent."""
+    meta_path = checkpoint_path + ".meta.json"
+    if os.path.exists(meta_path):
+        with open(meta_path, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def verify_semantic_ids_hash(checkpoint_path: str, current_hash: str) -> None:
+    """Fails loudly if a checkpoint was trained on a different Semantic-ID set.
+
+    Raises:
+        ValueError: if the checkpoint's recorded hash differs from ``current_hash``.
+    """
+    meta = read_checkpoint_meta(checkpoint_path)
+    stored = meta.get("semantic_ids_hash")
+    if stored is None:
+        print(
+            f"WARNING: no Semantic-ID hash recorded for {checkpoint_path}; cannot "
+            "verify that the checkpoint matches the current Semantic-ID file. "
+            "Results are only trustworthy if the same IDs were used for training."
+        )
+        return
+    if stored != current_hash:
+        raise ValueError(
+            f"Semantic-ID mismatch for {checkpoint_path}: checkpoint was trained on "
+            f"IDs with hash {stored} but the current Semantic-ID file hashes to "
+            f"{current_hash}. Decoding would land in the wrong code space (all "
+            "predictions invalid). Regenerate/point to the matching Semantic-ID file."
+        )
+
+
+def assert_decode_validity(results: Dict[str, float], min_valid_beam: float = 0.01) -> None:
+    """Guards against silently reporting all-zero metrics from a broken decode.
+
+    A near-zero ``Valid@Beam`` means essentially every decoded Semantic-ID path
+    fails to map to a real item — usually a Semantic-ID / checkpoint mismatch — so
+    the reported ranking metrics are meaningless. Raise instead of logging zeros.
+    """
+    valid_beam = results.get("Valid@Beam")
+    if valid_beam is not None and valid_beam < min_valid_beam:
+        raise ValueError(
+            f"Decode validity too low (Valid@Beam={valid_beam:.5f} < {min_valid_beam}). "
+            "Almost no decoded Semantic IDs map to real items — the checkpoint and the "
+            "Semantic-ID file are almost certainly mismatched. Refusing to report "
+            "meaningless all-zero metrics."
+        )
 
 
 def load_checkpoint(

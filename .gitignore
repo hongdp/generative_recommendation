@@ -50,3 +50,6 @@ ENV/
 .vscode/
 .idea/
 .DS_Store
+
+# TPU Sync directory
+tpu_sync/

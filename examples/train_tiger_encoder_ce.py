@@ -21,34 +21,28 @@ import flax.linen as nn
 from datasets import MovieLensDataLoader, AmazonDataLoader, SteamDataLoader
 from models.tiger_seq2seq import TIGERSeq2SeqModel
 from models.tiger_encoder_ce import TIGEREncoderCEModel
+from models.tiger_tokenization import (
+    load_semantic_ids,
+    semantic_ids_hash,
+    sequence_to_encoder_tokens as sequence_to_tiger_tokens,
+)
 from evaluation.evaluator import Evaluator
-from evaluation.training_utils import EarlyStopper, save_checkpoint, load_checkpoint, log_results_to_markdown
-
+from evaluation.training_utils import (
+    EarlyStopper,
+    save_checkpoint,
+    load_checkpoint,
+    log_results_to_markdown,
+    verify_semantic_ids_hash,
+)
 from flax.jax_utils import replicate, unreplicate
 from flax.training.common_utils import shard
-
-
-def sequence_to_tiger_tokens(item_seq, semantic_ids, K):
-    """Converts a batch of item sequences into flat, level-shifted TIGER encoder tokens."""
-    batch_size = len(item_seq)
-    max_len = item_seq.shape[1]
-
-    encoder_inputs = np.zeros((batch_size, 3 * max_len), dtype=np.int32)
-
-    for i in range(batch_size):
-        seq = item_seq[i]
-        non_pad_indices = np.where(seq != 0)[0]
-        num_pad = max_len - len(non_pad_indices)
-
-        for idx, pos in enumerate(non_pad_indices):
-            item = seq[pos]
-            c1, c2, c3 = semantic_ids[item]
-            write_pos = 3 * num_pad + 3 * idx
-            encoder_inputs[i, write_pos] = c1 + 1
-            encoder_inputs[i, write_pos + 1] = c2 + K + 1
-            encoder_inputs[i, write_pos + 2] = c3 + 2 * K + 1
-
-    return encoder_inputs
+import grain.python as grain
+import sys
+from absl import flags
+try:
+    flags.FLAGS(sys.argv)
+except Exception:
+    pass
 
 
 
@@ -103,8 +97,9 @@ def main():
     ids_path = args.semantic_ids_path
     if not os.path.exists(ids_path):
         raise FileNotFoundError(f"Semantic IDs not found at {ids_path}.")
-    with open(ids_path, "r") as f:
-        semantic_ids = {int(k): v for k, v in json.load(f).items()}
+    semantic_ids = load_semantic_ids(ids_path)
+    ids_hash = semantic_ids_hash(semantic_ids)
+    print(f"Loaded Semantic IDs from {ids_path} (hash={ids_hash})")
 
     K = 256
     vocab_size = 3 * K + 2
@@ -195,6 +190,7 @@ def main():
     start_epoch = 1
     
     # Auto-resume from latest checkpoint if resume_path not set
+    best_ckpt_path = os.path.join(args.checkpoint_dir, "best_checkpoint.msgpack")
     if not args.resume_path:
         latest_ckpt = os.path.join(args.checkpoint_dir, "latest_checkpoint.msgpack")
         if os.path.exists(latest_ckpt):
@@ -203,12 +199,18 @@ def main():
     if args.resume_path:
         print(f"Loading checkpoint from {args.resume_path}...")
         try:
+            verify_semantic_ids_hash(args.resume_path, ids_hash)
             checkpoint_state = load_checkpoint(args.resume_path, unreplicate(params), unreplicate(opt_state))
             params = replicate(checkpoint_state["params"])
             opt_state = replicate(checkpoint_state["opt_state"])
             start_epoch = checkpoint_state["epoch"] + 1
             early_stopper.best_metrics["NDCG@10"] = float(checkpoint_state["best_val_ndcg"])
-            early_stopper.best_params = unreplicate(params)
+            # Restore true best-val params from the best checkpoint (not the latest
+            # epoch) so a resumed run's final eval uses best-val weights.
+            if os.path.exists(best_ckpt_path):
+                early_stopper.best_params = load_checkpoint(best_ckpt_path, unreplicate(params), unreplicate(opt_state))["params"]
+            else:
+                early_stopper.best_params = unreplicate(params)
             print(f"Resumed from epoch {checkpoint_state['epoch']} with best validation NDCG@10 = {checkpoint_state['best_val_ndcg']:.5f}")
         except Exception as e:
             print(f"Failed to load checkpoint: {e}. Starting from scratch.")
@@ -216,30 +218,54 @@ def main():
     batch_size = args.batch_size
     num_samples = len(train_tar)
     epoch_rng = jax.random.PRNGKey(777)
-    global_step = 0
+    
+    num_batches_total = num_samples // batch_size
+    global_step = (start_epoch - 1) * num_batches_total
+
+    class InMemoryDataSource:
+        def __init__(self, enc, tar):
+            self.enc = enc
+            self.tar = tar
+        def __len__(self):
+            return len(self.enc)
+        def __getitem__(self, idx):
+            return self.enc[idx], self.tar[idx]
+
+    source = InMemoryDataSource(train_enc_in, train_tar)
+    sampler = grain.IndexSampler(
+        num_records=len(source),
+        num_epochs=args.epochs - start_epoch + 1,
+        shard_options=grain.NoSharding(),
+        shuffle=True,
+        seed=777,
+    )
+    dataloader = grain.DataLoader(
+        data_source=source,
+        sampler=sampler,
+        # worker_count=0: in-memory numpy source; multiprocess workers add no
+        # throughput and crash on grain/absl flag parsing in child processes.
+        worker_count=0,
+        worker_buffer_size=2,
+        operations=[
+            grain.Batch(batch_size=batch_size, drop_remainder=True)
+        ]
+    )
 
     print(f"\nTraining for {args.epochs} epochs...")
+    
+    iterator = iter(dataloader)
     for epoch in range(start_epoch, args.epochs + 1):
-        indices = np.arange(num_samples)
-        np.random.shuffle(indices)
-        shuffled_enc_in = train_enc_in[indices]
-        shuffled_tar = train_tar[indices]
-
         epoch_loss = 0.0
         num_batches = 0
         start_time = time.time()
 
-        for i in range(0, num_samples, batch_size):
-            if i + batch_size > num_samples:
-                break
-
-            batch_enc = jnp.array(shuffled_enc_in[i:i+batch_size])
-            batch_tar = jnp.array(shuffled_tar[i:i+batch_size])
+        for _ in range(num_batches_total):
+            batch_enc_np, batch_tar_np = next(iterator)
             epoch_rng, step_rng = jax.random.split(epoch_rng)
 
             # Shard data across devices: (batch, ...) -> (num_devices, batch/num_devices, ...)
-            batch_enc_sharded = shard(batch_enc)
-            batch_tar_sharded = shard(batch_tar)
+            batch_enc_sharded = shard(batch_enc_np)
+            batch_tar_sharded = shard(batch_tar_np)
             
             # Since step_rng needs to be unique per device, we can split it
             step_rngs = jax.random.split(step_rng, jax.local_device_count())
@@ -308,6 +334,7 @@ def main():
                 early_stopper.get_best("NDCG@10"),
                 args.checkpoint_dir,
                 "best_checkpoint.msgpack",
+                semantic_ids_hash=ids_hash,
             )
             print(f"Checkpoint saved to {checkpoint_path}")
         elif early_stopper.should_stop:
@@ -315,9 +342,10 @@ def main():
             break
 
         save_checkpoint(
-            params, opt_state, epoch,
+            unreplicate(params), unreplicate(opt_state), epoch,
             early_stopper.get_best("NDCG@10"),
             args.checkpoint_dir, filename="latest_checkpoint.msgpack",
+            semantic_ids_hash=ids_hash,
         )
 
     # 9. Final test evaluation
