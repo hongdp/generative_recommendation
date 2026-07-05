@@ -52,9 +52,16 @@ def main():
     parser.add_argument("--num_levels", type=int, default=3, help="Number of quantization levels.")
     parser.add_argument("--num_codes", type=int, default=256, help="Codebook size (K) per level.")
     parser.add_argument("--dataset", type=str, default="ml-1m", choices=["ml-1m", "beauty", "sports", "toys", "steam"], help="Dataset name.")
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed for reproducible cluster assignments.")
     args = parser.parse_args()
 
-    print(f"--- Running RQ-KMeans for TIGER Semantic IDs on {args.dataset} ---")
+    # RQ-KMeans centroid initialization uses np.random; seed it so the exported
+    # Semantic IDs are reproducible. Without this, every regeneration yields a
+    # different code assignment, silently breaking any checkpoint trained on the
+    # previous IDs (see assert_decode_validity / verify_semantic_ids_hash).
+    np.random.seed(args.seed)
+
+    print(f"--- Running RQ-KMeans for TIGER Semantic IDs on {args.dataset} (seed={args.seed}) ---")
 
     # 1. Load dataset to get item mapping and titles
     data_dir = args.data_dir

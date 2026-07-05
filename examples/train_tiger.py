@@ -8,84 +8,25 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import flax.serialization
 
 from datasets import MovieLensDataLoader, AmazonDataLoader, SteamDataLoader
 from models.tiger_model import TIGERModel
-from evaluation.metrics import compute_ranks_from_predictions, calculate_metrics_from_ranks
-
-
-def sequence_to_tiger_tokens(item_seq, semantic_ids, K, start_token):
-    """Converts a batch of item sequences into flat, level-shifted TIGER tokens.
-
-    For each item in sequence:
-      - 0 (padding) maps to [0, 0, 0]
-      - item > 0 maps to [c1 + 1, c2 + K + 1, c3 + 2*K + 1]
-    Prepend start_token to the beginning of the sequence.
-    """
-    batch_size = len(item_seq)
-    max_len = item_seq.shape[1]
-    
-    # We construct a static sequence length: 3 * max_len + 1 (start token + 3 tokens per item)
-    flat_tokens = np.zeros((batch_size, 3 * max_len + 1), dtype=np.int32)
-    flat_tokens[:, 0] = start_token
-
-    for i in range(batch_size):
-        seq = item_seq[i]
-        # Find non-padding elements
-        non_pad_indices = np.where(seq != 0)[0]
-        num_pad = max_len - len(non_pad_indices)
-        
-        # Pad tokens [0, 0, 0] are already zero by default, so we only fill non-pad
-        for idx, pos in enumerate(non_pad_indices):
-            item = seq[pos]
-            c1, c2, c3 = semantic_ids[item]
-            # Write to position: start_token + 3 * pad + 3 * index
-            write_pos = 1 + 3 * num_pad + 3 * idx
-            flat_tokens[i, write_pos] = c1 + 1
-            flat_tokens[i, write_pos + 1] = c2 + K + 1
-            flat_tokens[i, write_pos + 2] = c3 + 2 * K + 1
-            
-    return flat_tokens
-
-
-def preprocess_training_data(inputs, targets, semantic_ids, K, start_token):
-    """Formats inputs and targets into flat TIGER tokens for teacher-forced training.
-
-    Input sequence shape: [batch, 3 * L + 3]
-    Target sequence shape: [batch, 3 * L + 3]
-    """
-    batch_size = len(inputs)
-    max_len = inputs.shape[1]
-    
-    # Flat tokens shape: [batch, 3 * L + 4] (start + inputs + target item)
-    flat_tokens = np.zeros((batch_size, 3 * max_len + 4), dtype=np.int32)
-    flat_tokens[:, 0] = start_token
-
-    for i in range(batch_size):
-        seq = inputs[i]
-        tar = targets[i]
-        non_pad_indices = np.where(seq != 0)[0]
-        num_pad = max_len - len(non_pad_indices)
-        
-        # Write input items
-        for idx, pos in enumerate(non_pad_indices):
-            item = seq[pos]
-            c1, c2, c3 = semantic_ids[item]
-            write_pos = 1 + 3 * num_pad + 3 * idx
-            flat_tokens[i, write_pos] = c1 + 1
-            flat_tokens[i, write_pos + 1] = c2 + K + 1
-            flat_tokens[i, write_pos + 2] = c3 + 2 * K + 1
-            
-        # Append target item at the end
-        c1, c2, c3 = semantic_ids[tar]
-        write_pos = 1 + 3 * max_len
-        flat_tokens[i, write_pos] = c1 + 1
-        flat_tokens[i, write_pos + 1] = c2 + K + 1
-        flat_tokens[i, write_pos + 2] = c3 + 2 * K + 1
-
-    # Return training inputs (first N-1 tokens) and targets (shifted N-1 tokens)
-    return flat_tokens[:, :-1], flat_tokens[:, 1:]
+from models.tiger_tokenization import (
+    load_semantic_ids,
+    semantic_ids_hash,
+    build_semantic_id_to_item,
+    sequence_to_decoder_only_tokens,
+    preprocess_decoder_only_training_data,
+)
+from evaluation.evaluator import Evaluator
+from evaluation.tiger_decode import make_decoder_only_predictor, beam_search_decode_decoder_only
+from evaluation.training_utils import (
+    EarlyStopper,
+    save_checkpoint,
+    load_checkpoint,
+    verify_semantic_ids_hash,
+    assert_decode_validity,
+)
 
 
 def main():
@@ -136,9 +77,10 @@ def main():
     ids_path = args.semantic_ids_path
     if not os.path.exists(ids_path):
         raise FileNotFoundError(f"Semantic IDs not found at {ids_path}. Generate them first.")
-    
-    with open(ids_path, "r") as f:
-        semantic_ids = {int(k): v for k, v in json.load(f).items()}
+
+    semantic_ids = load_semantic_ids(ids_path)
+    ids_hash = semantic_ids_hash(semantic_ids)
+    print(f"Loaded Semantic IDs from {ids_path} (hash={ids_hash})")
 
     # Constants
     K = 256  # Codebook size
@@ -151,16 +93,16 @@ def main():
     print("Preprocessing datasets into TIGER tokens...")
     train_dataset = loader.get_split("train", max_len=max_len, format_type="index")
     train_in, train_tar = train_dataset.to_numpy()
-    train_tokens_in, train_tokens_tar = preprocess_training_data(train_in, train_tar, semantic_ids, K, start_token)
+    train_tokens_in, train_tokens_tar = preprocess_decoder_only_training_data(train_in, train_tar, semantic_ids, K, start_token)
     print(f"Train split: {len(train_tokens_tar)} samples")
 
     val_dataset = loader.get_split("val", max_len=max_len, format_type="index")
     val_in, val_tar = val_dataset.to_numpy()
-    val_tokens_in = sequence_to_tiger_tokens(val_in, semantic_ids, K, start_token)
+    val_tokens_in = sequence_to_decoder_only_tokens(val_in, semantic_ids, K, start_token)
 
     test_dataset = loader.get_split("test", max_len=max_len, format_type="index")
     test_in, test_tar = test_dataset.to_numpy()
-    test_tokens_in = sequence_to_tiger_tokens(test_in, semantic_ids, K, start_token)
+    test_tokens_in = sequence_to_decoder_only_tokens(test_in, semantic_ids, K, start_token)
 
     # 3. Setup Model
     print("Initializing TIGER Model...")
@@ -206,129 +148,27 @@ def main():
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss
 
-    # 6. Define batched single-step prediction function for beam search decoding
-    @jax.jit
-    def predict_next_token(params, current_tokens):
-        logits = model.apply({"params": params}, current_tokens, deterministic=True)
-        # We only care about predicting the next token at the last position
-        return logits[:, -1, :]
+    # 6. Beam search decoding (shared implementation, parametrized by codebook K)
+    predict_next_token = make_decoder_only_predictor(model)
 
-    # 7. Batched Beam Search decoder
     def beam_search_decode(params, batch_inputs, B=10):
-        """Autoregressively decodes the top-B Semantic ID paths (c1, c2, c3) for the batch."""
-        batch_size = len(batch_inputs)
-        
-        # Step 1: Decode Level 1 token
-        logits1 = predict_next_token(params, batch_inputs)
-        # Log-probs for Level 1 tokens (indices 1 to 256)
-        log_probs1 = jax.nn.log_softmax(logits1[:, 1 : 257], axis=-1)
-        top_probs, top_indices = jax.lax.top_k(log_probs1, k=B)  # [batch_size, B]
-        
-        # Convert indices back to token IDs
-        top_tokens1 = top_indices + 1
-
-        # Step 2: Decode Level 2 token (Batched across beams)
-        # Replicate context: shape [batch_size * B, 3 * L + 1]
-        context2 = np.repeat(batch_inputs, B, axis=0)
-        # Append Level 1 token: shape [batch_size * B, 3 * L + 2]
-        context2 = np.concatenate([context2, top_tokens1.reshape(-1, 1)], axis=-1)
-        
-        logits2 = predict_next_token(params, context2)
-        # Log-probs for Level 2 tokens (indices 257 to 512)
-        log_probs2 = jax.nn.log_softmax(logits2[:, 257 : 513], axis=-1)  # [batch_size * B, 256]
-        log_probs2 = log_probs2.reshape(batch_size, B, 256)
-        
-        # Cumulative probability
-        cum_probs2 = top_probs[:, :, None] + log_probs2  # [batch_size, B, 256]
-        cum_probs2 = cum_probs2.reshape(batch_size, -1)  # [batch_size, B * 256]
-        
-        top_probs2, top_flat_indices2 = jax.lax.top_k(cum_probs2, k=B)  # [batch_size, B]
-        
-        # Extract indices
-        beam_idx2 = top_flat_indices2 // 256
-        c2 = top_flat_indices2 % 256
-        # Gather Level 1 tokens
-        c1 = top_indices[np.arange(batch_size)[:, None], beam_idx2]
-        
-        # Convert to token IDs
-        top_tokens1_expanded = c1 + 1
-        top_tokens2 = c2 + 257
-
-        # Step 3: Decode Level 3 token
-        # Replicate context
-        context3 = np.repeat(batch_inputs, B, axis=0)
-        # Append Level 1 and Level 2 tokens
-        context3 = np.concatenate([
-            context3,
-            top_tokens1_expanded.reshape(-1, 1),
-            top_tokens2.reshape(-1, 1)
-        ], axis=-1)
-        
-        logits3 = predict_next_token(params, context3)
-        # Log-probs for Level 3 tokens (indices 513 to 768)
-        log_probs3 = jax.nn.log_softmax(logits3[:, 513 : 769], axis=-1)  # [batch_size * B, 256]
-        log_probs3 = log_probs3.reshape(batch_size, B, 256)
-        
-        cum_probs3 = top_probs2[:, :, None] + log_probs3  # [batch_size, B, 256]
-        cum_probs3 = cum_probs3.reshape(batch_size, -1)  # [batch_size, B * 256]
-        
-        top_probs3, top_flat_indices3 = jax.lax.top_k(cum_probs3, k=B)  # [batch_size, B]
-        
-        beam_idx3 = top_flat_indices3 // 256
-        c3 = top_flat_indices3 % 256
-        c2_final = c2[np.arange(batch_size)[:, None], beam_idx3]
-        c1_final = c1[np.arange(batch_size)[:, None], beam_idx3]
-
-        return np.array(c1_final), np.array(c2_final), np.array(c3)
+        return beam_search_decode_decoder_only(params, batch_inputs, predict_next_token, K, B=B)
 
     # 8. Evaluation function
-    semantic_id_to_item = {tuple(v): k for k, v in semantic_ids.items()}
-    
+    semantic_id_to_item = build_semantic_id_to_item(semantic_ids)
+    evaluator = Evaluator(k_list=[1, 5, 10, 20])
+
     def evaluate_tiger(params, tokens_in, targets, batch_size=None):
         if batch_size is None:
             batch_size = args.batch_size
-        num_samples = len(tokens_in)
-        ranks = []
-        
-        total_paths = 0
-        valid_paths = 0
-        total_top1_paths = 0
-        valid_top1_paths = 0
-        
-        for i in range(0, num_samples, batch_size):
-            batch_in = tokens_in[i : i + batch_size]
-            batch_tar = targets[i : i + batch_size]
-            
-            c1_final, c2_final, c3_final = beam_search_decode(params, batch_in, B=beam_size)
-            
-            # Map paths to item mapped IDs
-            batch_predictions = []
-            for j in range(len(batch_in)):
-                sample_preds = []
-                for b in range(beam_size):
-                    path = (int(c1_final[j, b]), int(c2_final[j, b]), int(c3_final[j, b]))
-                    is_valid = path in semantic_id_to_item
-                    item = semantic_id_to_item.get(path, 0)
-                    sample_preds.append(item)
-                    
-                    total_paths += 1
-                    if is_valid:
-                        valid_paths += 1
-                    if b == 0:
-                        total_top1_paths += 1
-                        if is_valid:
-                            valid_top1_paths += 1
-                            
-                batch_predictions.append(sample_preds)
-                
-            batch_ranks = compute_ranks_from_predictions(batch_predictions, batch_tar)
-            ranks.extend(batch_ranks)
 
-        ranks = np.array(ranks)
-        results = calculate_metrics_from_ranks(ranks, k_list=[1, 5, 10, 20])
-        results["Valid@1"] = float(valid_top1_paths) / total_top1_paths if total_top1_paths > 0 else 0.0
-        results["Valid@Beam"] = float(valid_paths) / total_paths if total_paths > 0 else 0.0
-        return results
+        def predict(batch_inputs):
+            return beam_search_decode(params, batch_inputs, B=beam_size)
+
+        return evaluator.evaluate_generative_discrete(
+            predict, semantic_id_to_item, tokens_in, targets,
+            beam_size=beam_size, batch_size=batch_size,
+        )
 
     # 9. Resume training setup
     writer = None
@@ -344,34 +184,42 @@ def main():
     patience = args.patience
     patience_counter = 0
 
-    if args.resume_path:
-        print(f"Loading checkpoint from {args.resume_path}...")
-        state_template = {
-            "params": params,
-            "opt_state": opt_state,
-            "epoch": 0,
-            "best_val_ndcg": 0.0,
-        }
-        with open(args.resume_path, "rb") as f:
-            checkpoint_state = flax.serialization.from_bytes(state_template, f.read())
-        
-        params = checkpoint_state["params"]
-        opt_state = checkpoint_state["opt_state"]
-        start_epoch = checkpoint_state["epoch"] + 1
-        best_val_ndcg = float(checkpoint_state["best_val_ndcg"])
-        best_params = params
-        best_val_metrics["NDCG@10"] = best_val_ndcg
-        print(f"Resumed from epoch {checkpoint_state['epoch']} with best validation NDCG@10 = {best_val_ndcg:.5f}")
+    best_ckpt_path = os.path.join(args.checkpoint_dir, "best_checkpoint.msgpack")
 
     if args.eval_only:
-        if not args.resume_path:
-            raise ValueError("Must specify --resume_path when using --eval_only.")
-        print("\nRunning test evaluation only...")
+        # Evaluate the best-val checkpoint (explicit --resume_path overrides).
+        eval_ckpt = args.resume_path or best_ckpt_path
+        if not os.path.exists(eval_ckpt):
+            raise ValueError(f"No checkpoint to evaluate at {eval_ckpt}.")
+        print(f"Loading checkpoint for evaluation from {eval_ckpt}...")
+        verify_semantic_ids_hash(eval_ckpt, ids_hash)
+        checkpoint_state = load_checkpoint(eval_ckpt, params, opt_state)
+        best_params = checkpoint_state["params"]
+        print(f"Loaded checkpoint (epoch {checkpoint_state['epoch']}, "
+              f"best val NDCG@10={checkpoint_state['best_val_ndcg']:.5f}).")
         test_results = evaluate_tiger(best_params, test_tokens_in, test_tar, batch_size=args.batch_size)
+        assert_decode_validity(test_results)
         print("\n--- Test Evaluation Results ---")
         for metric, score in test_results.items():
             print(f"{metric}: {score:.5f}")
         return
+
+    if args.resume_path:
+        print(f"Loading checkpoint from {args.resume_path}...")
+        verify_semantic_ids_hash(args.resume_path, ids_hash)
+        checkpoint_state = load_checkpoint(args.resume_path, params, opt_state)
+        params = checkpoint_state["params"]
+        opt_state = checkpoint_state["opt_state"]
+        start_epoch = checkpoint_state["epoch"] + 1
+        best_val_ndcg = float(checkpoint_state["best_val_ndcg"])
+        best_val_metrics["NDCG@10"] = best_val_ndcg
+        # Restore the true best-val params from the best checkpoint so a resumed
+        # run's final test eval uses best-val weights, not the latest epoch.
+        if os.path.exists(best_ckpt_path):
+            best_params = load_checkpoint(best_ckpt_path, params, opt_state)["params"]
+        else:
+            best_params = params
+        print(f"Resumed from epoch {checkpoint_state['epoch']} with best validation NDCG@10 = {best_val_ndcg:.5f}")
 
     # 10. Training Loop
     epochs = args.epochs
@@ -445,16 +293,10 @@ def main():
                 best_params = params
                 patience_counter = 0
                 print(">>> New best validation score on at least one metric! Saving checkpoint...")
-                os.makedirs(args.checkpoint_dir, exist_ok=True)
-                checkpoint_path = os.path.join(args.checkpoint_dir, "best_checkpoint.msgpack")
-                checkpoint_state = {
-                    "params": params,
-                    "opt_state": opt_state,
-                    "epoch": epoch,
-                    "best_val_ndcg": best_val_ndcg,
-                }
-                with open(checkpoint_path, "wb") as f:
-                    f.write(flax.serialization.to_bytes(checkpoint_state))
+                checkpoint_path = save_checkpoint(
+                    params, opt_state, epoch, best_val_ndcg,
+                    args.checkpoint_dir, semantic_ids_hash=ids_hash,
+                )
                 print(f"Checkpoint saved to {checkpoint_path}")
             else:
                 patience_counter += 1
@@ -463,16 +305,11 @@ def main():
                     break
 
         # Save latest checkpoint
-        latest_path = os.path.join(args.checkpoint_dir, "latest_checkpoint.msgpack")
-        os.makedirs(args.checkpoint_dir, exist_ok=True)
-        checkpoint_state = {
-            "params": params,
-            "opt_state": opt_state,
-            "epoch": epoch,
-            "best_val_ndcg": best_val_ndcg,
-        }
-        with open(latest_path, "wb") as f:
-            f.write(flax.serialization.to_bytes(checkpoint_state))
+        save_checkpoint(
+            params, opt_state, epoch, best_val_ndcg,
+            args.checkpoint_dir, filename="latest_checkpoint.msgpack",
+            semantic_ids_hash=ids_hash,
+        )
 
     # 11. Final Test evaluation using best checkpoint
     if best_params is None:
@@ -480,6 +317,7 @@ def main():
 
     print("\nRunning final test evaluation...")
     test_results = evaluate_tiger(best_params, test_tokens_in, test_tar, batch_size=args.batch_size)
+    assert_decode_validity(test_results)
 
     print("\n--- Final Test Evaluation Results ---")
     for metric, score in test_results.items():

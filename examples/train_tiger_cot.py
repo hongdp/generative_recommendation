@@ -12,31 +12,11 @@ import flax.serialization
 
 from datasets import MovieLensDataLoader, AmazonDataLoader, SteamDataLoader
 from models.tiger_cot import TIGERCoTModel
+# Encoder tokenization is identical across the TIGER-family; share it. The CoT
+# decoder-input construction differs (length-4 teacher forcing), so that variant
+# preprocessing stays local below.
+from models.tiger_tokenization import sequence_to_encoder_tokens as sequence_to_tiger_tokens
 from evaluation.metrics import compute_ranks_from_predictions, calculate_metrics_from_ranks
-
-
-def sequence_to_tiger_tokens(item_seq, semantic_ids, K):
-    """Converts a batch of item sequences into flat, level-shifted TIGER encoder tokens."""
-    batch_size = len(item_seq)
-    max_len = item_seq.shape[1]
-    
-    encoder_inputs = np.zeros((batch_size, 3 * max_len), dtype=np.int32)
-
-    for i in range(batch_size):
-        seq = item_seq[i]
-        non_pad_indices = np.where(seq != 0)[0]
-        num_pad = max_len - len(non_pad_indices)
-        
-        for idx, pos in enumerate(non_pad_indices):
-            item = seq[pos]
-            c1, c2, c3 = semantic_ids[item]
-            # Write to position shifting padding to the left
-            write_pos = 3 * num_pad + 3 * idx
-            encoder_inputs[i, write_pos] = c1 + 1
-            encoder_inputs[i, write_pos + 1] = c2 + K + 1
-            encoder_inputs[i, write_pos + 2] = c3 + 2 * K + 1
-            
-    return encoder_inputs
 
 
 def preprocess_seq2seq_training_data(inputs, targets, semantic_ids, K, start_token):
