@@ -19,6 +19,12 @@ def main():
     parser.add_argument("--epochs", type=int, default=200, help="Number of training epochs.")
     parser.add_argument("--data_dir", type=str, default="./data", help="Directory for data.")
     parser.add_argument("--dataset", type=str, default="ml-1m", choices=["ml-1m", "beauty", "sports", "toys", "steam"], help="Dataset name.")
+    parser.add_argument("--embeddings_path", type=str, default="", help="Precomputed item-embedding .npy (index 0 = padding). Skips loader + MiniLM extraction.")
+    parser.add_argument("--output_path", type=str, default="", help="Output Semantic-ID JSON path (default: data/semantic_ids_<dataset>.json).")
+    parser.add_argument("--seed", type=int, default=1234, help="PRNG seed.")
+    parser.add_argument("--latent_dim", type=int, default=32, help="RQ-VAE latent dimension (LIGER uses 128).")
+    parser.add_argument("--batch_size", type=int, default=256, help="Batch size (LIGER uses 2048).")
+    parser.add_argument("--weight_decay", type=float, default=0.0, help="If >0, use AdamW with this weight decay (LIGER: 0.1).")
     args = parser.parse_args()
 
     print(f"--- Training RQ-VAE for TIGER Semantic IDs on {args.dataset} ---")
@@ -29,7 +35,10 @@ def main():
     # 1. Load dataset to get item mapping and titles
     data_dir = args.data_dir
     dataset = args.dataset.lower()
-    if dataset == "ml-1m":
+    if args.embeddings_path:
+        embeddings = np.load(args.embeddings_path)
+        print(f"Loaded precomputed embeddings {embeddings.shape} from {args.embeddings_path}")
+    elif dataset == "ml-1m":
         print(f"Loading MovieLens-1M dataset from {data_dir}...")
         loader = MovieLensDataLoader(dataset_name="ml-1m", data_dir=data_dir, min_rating=0)
     elif dataset in ["beauty", "sports", "toys"]:
@@ -41,21 +50,20 @@ def main():
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
 
-    print(f"Dataset stats: Users = {loader.num_users}, Items = {loader.num_items}")
-
-    # 2. Extract title embeddings
-    # Using lightweight sentence transformer all-MiniLM-L6-v2
-    # embeddings shape: (loader.num_items + 1, embedding_dim)
-    embeddings = extract_movie_embeddings(
-        loader.token_to_title,
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        batch_size=256,
-        device="cuda" if device == "cuda" else "cpu"
-    )
-    print(f"Movie embeddings shape: {embeddings.shape}")
+    if not args.embeddings_path:
+        print(f"Dataset stats: Users = {loader.num_users}, Items = {loader.num_items}")
+        # 2. Extract title embeddings with the lightweight MiniLM sentence encoder.
+        # embeddings shape: (loader.num_items + 1, embedding_dim)
+        embeddings = extract_movie_embeddings(
+            loader.token_to_title,
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            batch_size=256,
+            device="cuda" if device == "cuda" else "cpu"
+        )
+        print(f"Movie embeddings shape: {embeddings.shape}")
 
     # 3. Setup RQ-VAE Model
-    latent_dim = 32
+    latent_dim = args.latent_dim
     num_levels = 3
     num_codes = 256
     embedding_dim = embeddings.shape[-1]
@@ -69,14 +77,17 @@ def main():
         commitment_weight=0.25,
     )
 
-    key = jax.random.PRNGKey(1234)
+    key = jax.random.PRNGKey(args.seed)
     dummy_input = jnp.zeros((1, embedding_dim))
     variables = model.init(key, dummy_input)
     params = variables["params"]
 
     # 4. Set up Optimizer
     learning_rate = 1e-3
-    optimizer = optax.adam(learning_rate=learning_rate)
+    if args.weight_decay > 0:
+        optimizer = optax.adamw(learning_rate=learning_rate, weight_decay=args.weight_decay)
+    else:
+        optimizer = optax.adam(learning_rate=learning_rate)
     opt_state = optimizer.init(params)
 
     # 5. Define JIT training step
@@ -97,7 +108,7 @@ def main():
 
     # 6. Training loop
     epochs = args.epochs
-    batch_size = 256
+    batch_size = args.batch_size
     num_samples = len(embeddings)
     
     # Exclude the padding token embedding (index 0) during training
@@ -168,8 +179,11 @@ def main():
         for i in range(len(indices))
     }
     
-    output_filename = "semantic_ids.json" if dataset == "ml-1m" else f"semantic_ids_{dataset}.json"
-    output_path = os.path.join(data_dir, output_filename)
+    if args.output_path:
+        output_path = args.output_path
+    else:
+        output_filename = "semantic_ids.json" if dataset == "ml-1m" else f"semantic_ids_{dataset}.json"
+        output_path = os.path.join(data_dir, output_filename)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(semantic_ids_dict, f, indent=2)

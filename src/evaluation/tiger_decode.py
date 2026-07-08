@@ -60,50 +60,43 @@ def make_seq2seq_predictors(model):
     return predict_enc, predict_dec_step, predict_dec_step_beams
 
 
-def beam_search_decode_seq2seq(params, batch_enc_in, predictors, start_token, K, B=10):
-    """Top-B 3-level beam search for encoder-decoder TIGER models."""
+def beam_search_decode_seq2seq(params, batch_enc_in, predictors, start_token, K, B=10, num_levels=3):
+    """Top-B L-level beam search for encoder-decoder TIGER models.
+
+    Returns a tuple of ``num_levels`` arrays, each ``[batch, B]``, holding the
+    0-based codes of the top-B paths ordered by cumulative log-probability.
+    """
     predict_enc, predict_dec_step, predict_dec_step_beams = predictors
     batch_size = len(batch_enc_in)
     rows = jnp.arange(batch_size)[:, None]
+    L = num_levels
 
     encoder_outputs = predict_enc(params, batch_enc_in)
 
-    # Step 1: level-1 token.
-    dec_in1 = jnp.ones((batch_size, 1), dtype=jnp.int32) * start_token
-    logits1 = predict_dec_step(params, dec_in1, encoder_outputs, batch_enc_in)
-    log_probs1 = jax.nn.log_softmax(logits1[:, 1 : K + 1], axis=-1)
-    top_probs, top_indices = jax.lax.top_k(log_probs1, k=B)  # [batch, B]
-    top_tokens1 = top_indices + 1
+    # Level 1: expand from the bare start token.
+    W = min(B, K)
+    dec_in = jnp.ones((batch_size, 1), dtype=jnp.int32) * start_token
+    logits = predict_dec_step(params, dec_in, encoder_outputs, batch_enc_in)
+    log_probs = jax.nn.log_softmax(logits[:, 1 : K + 1], axis=-1)
+    cum_probs, top_indices = jax.lax.top_k(log_probs, k=W)  # [batch, W]
+    beams = [top_indices]  # per-level 0-based codes of live beams
 
-    # Step 2: level-2 token (batched across beams).
-    dec_in2_start = jnp.ones((batch_size, B, 1), dtype=jnp.int32) * start_token
-    dec_in2 = jnp.concatenate([dec_in2_start, top_tokens1[:, :, None]], axis=-1)
-    logits2 = predict_dec_step_beams(params, dec_in2, encoder_outputs, batch_enc_in)
-    log_probs2 = jax.nn.log_softmax(logits2[:, :, K + 1 : 2 * K + 1], axis=-1)
-    cum_probs2 = (top_probs[:, :, None] + log_probs2).reshape(batch_size, -1)
-    top_probs2, top_flat_indices2 = jax.lax.top_k(cum_probs2, k=B)
-    beam_idx2 = top_flat_indices2 // K
-    c2 = top_flat_indices2 % K
-    c1 = top_indices[rows, beam_idx2]
-    top_tokens1_expanded = c1 + 1
-    top_tokens2 = c2 + K + 1
+    # Levels 2..L: decoder inputs [start, tok_1, ..., tok_lvl] per beam.
+    for lvl in range(1, L):
+        dec_start = jnp.ones((batch_size, W, 1), dtype=jnp.int32) * start_token
+        prefix = [(beams[j] + j * K + 1)[:, :, None] for j in range(lvl)]
+        dec_in = jnp.concatenate([dec_start] + prefix, axis=-1)  # [batch, W, lvl+1]
+        logits = predict_dec_step_beams(params, dec_in, encoder_outputs, batch_enc_in)
+        lo = lvl * K + 1
+        log_probs = jax.nn.log_softmax(logits[:, :, lo : lo + K], axis=-1)  # [batch, W, K]
+        flat = (cum_probs[:, :, None] + log_probs).reshape(batch_size, -1)
+        W = min(B, W * K)
+        cum_probs, top_flat = jax.lax.top_k(flat, k=W)
+        beam_idx = top_flat // K
+        new_code = top_flat % K
+        beams = [b[rows, beam_idx] for b in beams] + [new_code]
 
-    # Step 3: level-3 token.
-    dec_in3_start = jnp.ones((batch_size, B, 1), dtype=jnp.int32) * start_token
-    dec_in3 = jnp.concatenate(
-        [dec_in3_start, top_tokens1_expanded[:, :, None], top_tokens2[:, :, None]],
-        axis=-1,
-    )
-    logits3 = predict_dec_step_beams(params, dec_in3, encoder_outputs, batch_enc_in)
-    log_probs3 = jax.nn.log_softmax(logits3[:, :, 2 * K + 1 : 3 * K + 1], axis=-1)
-    cum_probs3 = (top_probs2[:, :, None] + log_probs3).reshape(batch_size, -1)
-    _, top_flat_indices3 = jax.lax.top_k(cum_probs3, k=B)
-    beam_idx3 = top_flat_indices3 // K
-    c3 = top_flat_indices3 % K
-    c2_final = c2[rows, beam_idx3]
-    c1_final = c1[rows, beam_idx3]
-
-    return np.array(c1_final), np.array(c2_final), np.array(c3)
+    return tuple(np.array(b) for b in beams)
 
 
 # ---------------------------------------------------------------------------
@@ -120,43 +113,40 @@ def make_decoder_only_predictor(model):
     return predict_next_token
 
 
-def beam_search_decode_decoder_only(params, batch_inputs, predict_next_token, K, B=10):
-    """Top-B 3-level beam search for decoder-only TIGER models."""
+def beam_search_decode_decoder_only(params, batch_inputs, predict_next_token, K, B=10, num_levels=3):
+    """Top-B L-level beam search for decoder-only TIGER models.
+
+    Returns a tuple of ``num_levels`` arrays, each ``[batch, B]``, holding the
+    0-based codes of the top-B paths ordered by cumulative log-probability.
+    """
     batch_size = len(batch_inputs)
     rows = np.arange(batch_size)[:, None]
+    L = num_levels
 
-    # Step 1: level-1 token.
-    logits1 = predict_next_token(params, batch_inputs)
-    log_probs1 = jax.nn.log_softmax(logits1[:, 1 : K + 1], axis=-1)
-    top_probs, top_indices = jax.lax.top_k(log_probs1, k=B)
-    top_tokens1 = top_indices + 1
+    # Level 1: expand from the raw context. The live width W is capped by the
+    # number of expandable paths (K at level 1, W*K afterwards).
+    W = min(B, K)
+    logits = predict_next_token(params, batch_inputs)
+    log_probs = jax.nn.log_softmax(logits[:, 1 : K + 1], axis=-1)
+    cum_probs, top_indices = jax.lax.top_k(log_probs, k=W)  # [batch, W]
+    beams = [np.array(top_indices)]  # per-level 0-based codes of live beams
 
-    # Step 2: level-2 token (batched across beams by replicating context).
-    context2 = np.repeat(batch_inputs, B, axis=0)
-    context2 = np.concatenate([context2, np.array(top_tokens1).reshape(-1, 1)], axis=-1)
-    logits2 = predict_next_token(params, context2)
-    log_probs2 = jax.nn.log_softmax(logits2[:, K + 1 : 2 * K + 1], axis=-1).reshape(batch_size, B, K)
-    cum_probs2 = (top_probs[:, :, None] + log_probs2).reshape(batch_size, -1)
-    top_probs2, top_flat_indices2 = jax.lax.top_k(cum_probs2, k=B)
-    beam_idx2 = top_flat_indices2 // K
-    c2 = top_flat_indices2 % K
-    c1 = top_indices[rows, beam_idx2]
-    top_tokens1_expanded = c1 + 1
-    top_tokens2 = c2 + K + 1
+    # Levels 2..L: replicate context with the beam prefix appended, expand, re-rank.
+    for lvl in range(1, L):
+        context = np.repeat(batch_inputs, W, axis=0)
+        prefix_tokens = [
+            (beams[j] + j * K + 1).reshape(-1, 1) for j in range(lvl)
+        ]
+        context = np.concatenate([context] + prefix_tokens, axis=-1)
+        logits = predict_next_token(params, context)
+        lo = lvl * K + 1
+        log_probs = jax.nn.log_softmax(logits[:, lo : lo + K], axis=-1).reshape(batch_size, W, K)
+        flat = (cum_probs[:, :, None] + log_probs).reshape(batch_size, -1)
+        W = min(B, W * K)
+        cum_probs, top_flat = jax.lax.top_k(flat, k=W)  # [batch, W]
+        top_flat = np.array(top_flat)
+        beam_idx = top_flat // K
+        new_code = top_flat % K
+        beams = [b[rows, beam_idx] for b in beams] + [new_code]
 
-    # Step 3: level-3 token.
-    context3 = np.repeat(batch_inputs, B, axis=0)
-    context3 = np.concatenate(
-        [context3, np.array(top_tokens1_expanded).reshape(-1, 1), np.array(top_tokens2).reshape(-1, 1)],
-        axis=-1,
-    )
-    logits3 = predict_next_token(params, context3)
-    log_probs3 = jax.nn.log_softmax(logits3[:, 2 * K + 1 : 3 * K + 1], axis=-1).reshape(batch_size, B, K)
-    cum_probs3 = (top_probs2[:, :, None] + log_probs3).reshape(batch_size, -1)
-    _, top_flat_indices3 = jax.lax.top_k(cum_probs3, k=B)
-    beam_idx3 = top_flat_indices3 // K
-    c3 = top_flat_indices3 % K
-    c2_final = c2[rows, beam_idx3]
-    c1_final = c1[rows, beam_idx3]
-
-    return np.array(c1_final), np.array(c2_final), np.array(c3)
+    return tuple(np.array(b) for b in beams)

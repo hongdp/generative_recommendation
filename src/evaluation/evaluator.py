@@ -91,14 +91,14 @@ class Evaluator:
     ) -> Dict[str, float]:
         """Evaluates a generative model that decodes discrete Semantic IDs via beam search.
 
-        The decode_fn produces top-B Semantic ID paths (c1, c2, c3) which are
+        The decode_fn produces top-B Semantic ID paths (c1, ..., cL) which are
         mapped back to item IDs via semantic_id_to_item. Invalid paths map to 0.
 
         Args:
             decode_fn: A function that takes a batch of encoded input tokens
-              (shape: [batch, seq_len]) and returns 3 arrays:
-              (c1_final, c2_final, c3_final), each of shape [batch, beam_size].
-            semantic_id_to_item: mapping from (c1, c2, c3) tuple to item ID.
+              (shape: [batch, seq_len]) and returns a tuple of L arrays (one per
+              Semantic-ID level), each of shape [batch, beam_size].
+            semantic_id_to_item: mapping from (c1, ..., cL) tuple to item ID.
             inputs: encoded input tokens, shape (num_samples, token_len).
             targets: target item indices, shape (num_samples,).
             beam_size: number of beams in beam search.
@@ -119,16 +119,23 @@ class Evaluator:
             batch_in = inputs[i : i + batch_size]
             batch_tar = targets[i : i + batch_size]
 
-            c1_final, c2_final, c3_final = decode_fn(batch_in)
+            level_codes = decode_fn(batch_in)  # tuple of L arrays, each [batch, B]
 
             batch_predictions = []
             for j in range(len(batch_in)):
                 sample_preds = []
                 for b in range(beam_size):
-                    path = (int(c1_final[j, b]), int(c2_final[j, b]), int(c3_final[j, b]))
+                    path = tuple(int(codes[j, b]) for codes in level_codes)
                     is_valid = path in semantic_id_to_item
-                    item = semantic_id_to_item.get(path, 0)
-                    sample_preds.append(item)
+                    mapped = semantic_id_to_item.get(path, 0)
+                    if isinstance(mapped, (list, tuple)):
+                        # Collision-aware mapping: every item sharing this Semantic
+                        # ID enters the ranking here, pre-sorted by prior (see
+                        # build_semantic_id_to_items). Later beams are pushed down
+                        # accordingly, which is the honest ranking semantics.
+                        sample_preds.extend(mapped)
+                    else:
+                        sample_preds.append(mapped)
 
                     total_paths += 1
                     if is_valid:
