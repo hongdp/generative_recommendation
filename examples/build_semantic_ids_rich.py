@@ -59,11 +59,12 @@ def parse_rich_metadata(file_path):
                     "brand": data.get("brand"),
                     "categories": data.get("categories"),
                     "price": data.get("price"),
+                    "description": data.get("description"),
                 }
     return rich
 
 
-def build_rich_text(meta):
+def build_rich_text(meta, with_description=False):
     """Formats one item's metadata into the TIGER-paper content-field text."""
     parts = []
     if meta.get("title"):
@@ -82,6 +83,9 @@ def build_rich_text(meta):
     price = meta.get("price")
     if price is not None:
         parts.append(f"Price: ${price}.")
+    if with_description and meta.get("description"):
+        desc = str(meta["description"]).strip()[:300]
+        parts.append(f"Description: {desc}")
     return " ".join(parts) if parts else "Unknown product."
 
 
@@ -104,12 +108,12 @@ def stage_texts(args):
         for k in coverage:
             if meta.get(k):
                 coverage[k] += 1
-        rich_texts.append(build_rich_text(meta) if meta else f"Product_{asin}")
+        rich_texts.append(build_rich_text(meta, with_description=args.with_description) if meta else f"Product_{asin}")
         title_texts.append(loader.token_to_title.get(tok, f"Product_{asin}"))
     print("Field coverage over catalog:", {k: f"{v / loader.num_items:.1%}" for k, v in coverage.items()})
     print("Sample rich text:", rich_texts[0][:200])
 
-    out = os.path.join(args.data_dir, f"item_texts_{args.dataset}.json")
+    out = os.path.join(args.data_dir, f"item_texts{args.suffix}_{args.dataset}.json")
     with open(out, "w") as f:
         json.dump({"rich": rich_texts, "title": title_texts}, f)
     print(f"Wrote {out}")
@@ -141,21 +145,29 @@ def minilm_mean_pool_encode(texts, device, batch_size=256):
 
 
 def stage_encode(args):
-    with open(os.path.join(args.data_dir, f"item_texts_{args.dataset}.json")) as f:
+    with open(os.path.join(args.data_dir, f"item_texts{args.suffix}_{args.dataset}.json")) as f:
         texts = json.load(f)
     rich_texts, title_texts = texts["rich"], texts["title"]
     n = len(rich_texts)
 
     # Arm B: rich text with Sentence-T5 (the TIGER paper's encoder).
     from sentence_transformers import SentenceTransformer
-    print(f"[Arm B] Encoding {n} rich texts with {args.rich_encoder} on {args.device}...")
-    st = SentenceTransformer(args.rich_encoder, device=args.device)
-    emb = st.encode(rich_texts, batch_size=64, show_progress_bar=True, convert_to_numpy=True)
+    print(f"[Arm B] Encoding {n} rich texts with {args.rich_encoder} on {args.device} (bf16={args.bf16})...")
+    model_kwargs = {}
+    if args.bf16:
+        import torch
+        model_kwargs = {"torch_dtype": torch.bfloat16}
+    st = SentenceTransformer(args.rich_encoder, device=args.device, model_kwargs=model_kwargs)
+    if args.encode_max_seq > 0:
+        st.max_seq_length = args.encode_max_seq
+    emb = st.encode(rich_texts, batch_size=args.encode_batch, show_progress_bar=True, convert_to_numpy=True)
     rich = np.zeros((n + 1, emb.shape[1]), dtype=np.float32)
     rich[1:] = emb
-    np.save(os.path.join(args.data_dir, f"item_emb_rich_{args.dataset}.npy"), rich)
+    np.save(os.path.join(args.data_dir, f"item_emb_rich{args.suffix}_{args.dataset}.npy"), rich)
     print(f"[Arm B] embeddings {rich.shape} saved")
 
+    if args.skip_control:
+        return
     # Arm C: title-only with MiniLM mean pooling (matches the existing baseline pipeline).
     print(f"[Arm C] Encoding {n} title texts with MiniLM on {args.device}...")
     emb_c = minilm_mean_pool_encode(title_texts, args.device)
@@ -246,6 +258,12 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rich_encoder", type=str, default="sentence-transformers/sentence-t5-base")
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--suffix", type=str, default="", help="Filename suffix for text/embedding outputs (e.g. \"_desc\").")
+    parser.add_argument("--with_description", action="store_true", help="Include the description field in rich text.")
+    parser.add_argument("--bf16", action="store_true", help="Load the encoder in bfloat16 (needed to fit sentence-t5-xxl in 16GB).")
+    parser.add_argument("--encode_batch", type=int, default=64, help="Encoder batch size (use 8 for t5-xxl on 16GB).")
+    parser.add_argument("--encode_max_seq", type=int, default=0, help="If >0, cap the encoder max_seq_length (our texts are ~60 tokens; 128 saves memory).")
+    parser.add_argument("--skip_control", action="store_true", help="Skip the MiniLM title-only control encoding.")
     args = parser.parse_args()
 
     {"texts": stage_texts, "encode": stage_encode, "ids": stage_ids}[args.stage](args)

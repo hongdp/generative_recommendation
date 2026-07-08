@@ -74,6 +74,29 @@ def build_sequence_data(
     return inputs, targets
 
 
+def build_sequence_user_ids(user_history, split):
+    """Returns the user id of every sample emitted by build_sequence_data.
+
+    Iterates user_history in the same order and applies the same per-split
+    emission rules, so index i here corresponds to sample i of
+    build_sequence_data(user_history, ..., split).
+    """
+    user_ids = []
+    for user_id, seq in user_history.items():
+        n = len(seq)
+        if n < 2:
+            continue
+        if split == "test":
+            user_ids.append(user_id)
+        elif split == "val":
+            if n < 3:
+                continue
+            user_ids.append(user_id)
+        elif split == "train":
+            user_ids.extend([user_id] * max(0, n - 3))
+    return user_ids
+
+
 class SequenceDataset:
     """Wrapper class for sequential recommendation inputs and targets."""
 

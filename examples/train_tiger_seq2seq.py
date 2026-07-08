@@ -61,6 +61,11 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=5e-4, help="Learning rate.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay rate.")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size for training and evaluation.")
+    parser.add_argument("--num_levels", type=int, default=3, help="Number of Semantic-ID levels (L).")
+    parser.add_argument("--num_codes", type=int, default=256, help="Codebook size per level (K).")
+    parser.add_argument("--lr_schedule", type=str, default="constant", choices=["constant", "cosine"], help="LR schedule.")
+    parser.add_argument("--warmup_steps", type=int, default=10000, help="Warmup steps for cosine schedule.")
+    parser.add_argument("--eval_every", type=int, default=1, help="Run validation every N epochs.")
     args = parser.parse_args()
 
     dataset = args.dataset.lower()
@@ -96,8 +101,9 @@ def main():
     print(f"Loaded Semantic IDs from {ids_path} (hash={ids_hash})")
 
     # Constants
-    K = 256  # Codebook size
-    vocab_size = 3 * K + 2  # c1: [1, 256], c2: [257, 512], c3: [513, 768], start: 769, pad: 0
+    K = args.num_codes  # Codebook size per level
+    L = args.num_levels  # Number of Semantic-ID levels
+    vocab_size = L * K + 2  # level i: [i*K+1, (i+1)*K], start: L*K+1, pad: 0
     start_token = vocab_size - 1
     max_len = 20 if dataset in ["beauty", "sports", "toys", "steam"] else 50
     beam_size = 20
@@ -107,17 +113,17 @@ def main():
     train_dataset = loader.get_split("train", max_len=max_len, format_type="index")
     train_in, train_tar = train_dataset.to_numpy()
     train_enc_in, train_dec_in, train_dec_tar = preprocess_seq2seq_training_data(
-        train_in, train_tar, semantic_ids, K, start_token
+        train_in, train_tar, semantic_ids, K, start_token, num_levels=L
     )
     print(f"Train split: {len(train_dec_tar)} samples")
 
     val_dataset = loader.get_split("val", max_len=max_len, format_type="index")
     val_in, val_tar = val_dataset.to_numpy()
-    val_enc_in = sequence_to_encoder_tokens(val_in, semantic_ids, K)
+    val_enc_in = sequence_to_encoder_tokens(val_in, semantic_ids, K, num_levels=L)
 
     test_dataset = loader.get_split("test", max_len=max_len, format_type="index")
     test_in, test_tar = test_dataset.to_numpy()
-    test_enc_in = sequence_to_encoder_tokens(test_in, semantic_ids, K)
+    test_enc_in = sequence_to_encoder_tokens(test_in, semantic_ids, K, num_levels=L)
 
     # 3. Setup Model
     print("Initializing TIGER Seq2Seq Model...")
@@ -128,20 +134,29 @@ def main():
         num_heads=args.num_heads,
         attention_dim=args.attention_dim,
         linear_dim=args.linear_dim,
-        max_encoder_len=3 * max_len + 4,
-        max_decoder_len=4,
+        max_encoder_len=L * max_len + L + 1,
+        max_decoder_len=L + 1,
         attn_dropout_rate=args.dropout_rate,
         linear_dropout_rate=args.dropout_rate,
     )
 
     key = jax.random.PRNGKey(42)
-    dummy_enc = jnp.zeros((1, 3 * max_len), dtype=jnp.int32)
-    dummy_dec = jnp.zeros((1, 3), dtype=jnp.int32)
+    dummy_enc = jnp.zeros((1, L * max_len), dtype=jnp.int32)
+    dummy_dec = jnp.zeros((1, L), dtype=jnp.int32)
     variables = model.init(key, dummy_enc, dummy_dec)
     params = variables["params"]
 
     # 4. Setup Optimizer
-    optimizer = optax.adamw(learning_rate=args.learning_rate, weight_decay=args.weight_decay)
+    if args.lr_schedule == "cosine":
+        steps_per_epoch = max(1, len(train_dec_tar) // args.batch_size)
+        total_steps = steps_per_epoch * args.epochs
+        lr = optax.warmup_cosine_decay_schedule(
+            init_value=0.0, peak_value=args.learning_rate,
+            warmup_steps=args.warmup_steps, decay_steps=total_steps, end_value=args.learning_rate * 0.02)
+        print(f"LR schedule: cosine (warmup {args.warmup_steps}, total {total_steps} steps)")
+    else:
+        lr = args.learning_rate
+    optimizer = optax.adamw(learning_rate=lr, weight_decay=args.weight_decay)
     opt_state = optimizer.init(params)
 
     params = replicate(params)
@@ -173,7 +188,7 @@ def main():
     predictors = make_seq2seq_predictors(model)
 
     def beam_search_decode(params, batch_enc_in, B=10):
-        return beam_search_decode_seq2seq(params, batch_enc_in, predictors, start_token, K, B=B)
+        return beam_search_decode_seq2seq(params, batch_enc_in, predictors, start_token, K, B=B, num_levels=L)
 
     # 8. Evaluation setup
     semantic_id_to_item = build_semantic_id_to_item(semantic_ids)
@@ -320,7 +335,15 @@ def main():
         if writer is not None:
             writer.add_scalar("Loss/train_epoch", avg_loss, global_step)
 
-        # Evaluate on validation split every epoch
+        # Evaluate on validation split every --eval_every epochs
+        if epoch % args.eval_every != 0:
+            save_checkpoint(
+                unreplicate(params), unreplicate(opt_state), epoch,
+                early_stopper.get_best("NDCG@10"),
+                args.checkpoint_dir, filename="latest_checkpoint.msgpack",
+                semantic_ids_hash=ids_hash,
+            )
+            continue
         print(f"Evaluating validation split at epoch {epoch}...")
         val_params = unreplicate(params)
         def val_predict(batch_inputs):
