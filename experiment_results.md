@@ -122,3 +122,65 @@ Counterfactual decomposition (val per-bucket HR × test bucket shares = 0.0444):
 - **46% = within-bucket decline**, from (a) model-selection bias (best epoch picked on val inflates val) and (b) temporal drift (equal-frequency test targets are more recent; their co-occurrence evidence is staler).
 - **Why Steam doesn't show this:** median test-target train-freq is 16,182 (vs Beauty's 58); 99.6% of Steam targets sit deep in the saturated flat part of the frequency curve, and the val/test popularity ratio (1.30×, identical on both datasets) shifts nothing there.
 - **Actionable target:** Beauty's ceiling is set by tail-item learnability — freq<20 targets (21% of test) have HR ≈ 0 even with rich-text IDs, i.e. semantic generalization is not yet reaching the tail. Improving tail transfer (better IDs, dedup token, user token) matters more than squeezing the head.
+## Semantic-ID Levels × Codebook Grid on Beauty (2026-07-06/07)
+
+All runs: rich-text Sentence-T5 embeddings + seeded RQ-KMeans IDs, identical model (blocks=4, embed=384) and schedule (30 epochs, patience 10). Baseline is the Arm-B row above (L3×K256 = 0.02192 NDCG@10).
+
+| Config | ID space | Collision rate | Test HR@5 | HR@10 | HR@20 | NDCG@10 | vs baseline |
+|:--|--:|--:|--:|--:|--:|--:|:--|
+| L2×K256 | 65K | 40.7% | 0.01704 | 0.02737 | 0.04132 | 0.01482 | −32% |
+| L2×K512 | 262K | 24.9% | 0.01936 | 0.02951 | 0.04494 | 0.01594 | −27% |
+| L3×K128 | 2.1M | 10.0% | 0.02428 | 0.03448 | 0.05040 | 0.01974 | −10% |
+| L4×K64 | 16.7M | 5.1% | 0.02482 | 0.03622 | 0.05232 | 0.02028 | −7.5% |
+| **L3×K256 (baseline)** | 16.7M | 7.3% | 0.02522 | 0.03886 | 0.05621 | **0.02192** | — |
+| L3×K256 + level loss weights [2,1,0.5] | 16.7M | 7.3% | 0.02129 | 0.03255 | 0.04727 | 0.01861 | **−15%** |
+
+Findings:
+1. **Two regimes.** At high collision rates (L2 configs) reachability dominates: 41% unreachable items puts L2×K256 (0.01482) *below the random-ID floor* (0.01629). At low collision rates the **level penalty** appears: L4×K64 has *fewer* collisions than baseline (5.1% vs 7.3%) yet loses by 7.5% — each extra level is another sequential beam commitment (see the beam-attrition diagnostic), and K=64 is too coarse per level. **L3×K256 sits near the joint optimum**; the TIGER paper's choice is well-supported.
+2. **Front-weighted level loss HURTS: −15% NDCG@10**, and Valid@Beam drops 0.975 → 0.892. Empirical close-out of the "weight earlier levels for generalization" hypothesis: CE weighting cannot add information at L1 (its difficulty is intrinsic next-cluster uncertainty — L1 teacher-forced acc is frequency-independent at ~6%), while down-weighting L3 degrades the memorization deeper levels need, producing more invalid paths. Consistent with the earlier probe where even exhaustive L1 beam widening gained nothing.
+
+### Collision-aware decoding probe (expand tied items by popularity, 2026-07-07)
+
+Decode-side alternative to the dedup token: map each decoded path to *all* items sharing that Semantic ID, ordered by train-frequency prior (tie-break: item id). Re-evaluated every checkpoint, decoding once and ranking under both mappings:
+
+| Config (collision rate) | NDCG@10 single → collide+ | Verdict |
+|:--|:--|:--|
+| L2×K256 (40.7%) | 0.01482 → 0.01273 | **−14%: backfires** — fat paths dilute ranks; popularity is a poor P(item\|path) when clusters are large |
+| L2×K512 (24.9%) | 0.01594 → 0.01638 | +2.8% |
+| L3×K128 (10.0%) | 0.01974 → 0.01923 | −2.6% |
+| L3×K256 rich (7.3%) | 0.02192 → 0.02159 | −1.5% (HR@20 +4.4%) |
+| L4×K64 (5.1%) | 0.02028 → 0.02030 | flat |
+| L3×K256 title/VAE (arm A) | 0.01955 → 0.02025 | +3.6% |
+| weighted arm | 0.01861 → 0.01981 | +6.4% (partially repairs its sloppy L3) |
+| random IDs (0.04%) | 0.01629 → 0.01629 | sanity check: identical ✓ |
+
+Conclusion: collision expansion is **not a free win** — reachability gains are mostly offset (or overwhelmed, at high collision rates) by rank dilution from fat paths. The static popularity prior is too weak an approximation of P(item|path). The proper fix remains the **dedup token**, which gives every item a unique, *learned* suffix instead of a fixed prior.
+## Close-the-gap iterations toward LIGER's TIGER (HR@10=0.0601), 2026-07-07
+
+| Date | Config | Test HR@5 | HR@10 | HR@20 | NDCG@10 | Val peak NDCG@10 | Notes |
+|:--|:--|--:|--:|--:|--:|--:|:--|
+| 2026-07-07 | Dedup token (rich KMeans IDs + 4th disambiguation level, collisions 7.3%→0%) | 0.02535 | 0.03792 | 0.05362 | 0.02173 | 0.03337 | **Val +12% but test FLAT vs baseline 0.02192.** Val plateaus at epoch 3; loose any-metric best-checkpoint selection drifted to epoch 26 (23 epochs of overfitting). Valid@Beam 0.936 (4th level adds some invalid paths). Lesson: overfitting + val-selection noise is now the binding constraint — regularization (LIGER recipe) needed before ID gains can transfer to test. |
+| 2026-07-07 | RQ-VAE(std-emb) rich IDs + dedup (collisions 2.68%→0%), standard arch | 0.02772 | 0.04190 | 0.06216 | 0.02409 | — | ✅ **+7.8% HR@10 / +9.9% NDCG@10 over baseline.** RQ-VAE required per-dim standardization of the L2-normalized T5 embeddings (raw scale collapses the codebook to 3/5/9 codes, 98.9% collisions; standardized: 138/256/256 codes, 2.68%). Valid@Beam 0.993 — VAE's cleaner clusters make the dedup level far easier than KMeans' (0.936). Early stop @14. |
+| 2026-07-07 | **LIGER recipe** (6 blocks × embed 128, heads 4, FFN 1024, dropout 0.2) on rich KMeans+dedup IDs | 0.03130 | **0.04744** | 0.07038 | **0.02643** | — | ✅✅ **+22% HR@10 / +20.6% NDCG@10 over baseline — regularization was the binding constraint.** Trains productively to epoch 38 (vs val-peak-at-3 with the fat 4×384 model); unlocks the dedup gains that tested flat under the old recipe. Params ~1.3M vs 5.8M. Valid@Beam 0.989. |
+| 2026-07-07 | Combo: LIGER recipe + RQ-VAE+dedup IDs | 0.03211 | **0.04820** | 0.07070 | 0.02623 | 0.03781 | Current best HR@10, but only +1.6% over the KMeans+dedup recipe run (NDCG@10 −0.8%) — **the RQ-VAE and regularization gains do not compose**; under strong regularization the quantizer difference is largely absorbed. Early stop @32. Valid@Beam 0.996. Remaining to LIGER's 0.0601: −22%. |
+| 2026-07-07 | Text upgrade: +description field, sentence-t5-LARGE encoder (RQ-VAE+dedup, LIGER recipe) | 0.02848 | 0.04324 | 0.06609 | 0.02431 | 0.03803 | ❌ **−10% vs combo (0.04820)** — description text + larger encoder makes embeddings more diffuse (pre-dedup collisions 2.68%→5.27%), degrading cluster/behavior alignment. Text-side levers exhausted; title+brand+category+price with t5-base remains the best ID recipe. |
+| 2026-07-07 | +User token (2000 hash buckets, combo config) | 0.01963 | 0.03135 | 0.04856 | 0.01699 | 0.02604 | ❌ **−35% vs combo** — fragments sparse data (~11 users/bucket of signal); val peaked at epoch 10 then declined (run interrupted at 14, best ckpt evaluated). User token is a NEGATIVE on 5-core Beauty. |
+| 2026-07-07 | LIGER-exact long run (cosine 3e-4, warmup 10k, wd 0.035, ~200k-step budget, attention 384=64x6, eval/10ep) | 0.02969 | 0.04561 | 0.06649 | 0.02548 | 0.03501 | ❌ **Training budget ruled out**: early stop @180 epochs, val flat 0.034-0.035 from epoch 90 on — model saturates ~100 epochs; 10x budget and 3x attention width land slightly BELOW combo (0.04820). |
+| 2026-07-07 | **Enc-dec (T5-style 6+6, embed 128, attn 384=64x6, dropout 0.2) + RQ-VAE+dedup IDs, cosine 3e-4** | 0.03327 | **0.04972** | 0.07374 | **0.02804** | 0.04062 | ✅ **NEW BEST — architecture switch works (+3.2% HR@10 / +6.9% NDCG@10 over combo).** Best val at epoch 40 (0.04062, highest of campaign) then declines; run killed at 90, best ckpt evaluated. Now at 82.7% of LIGER's HR@10 (0.0601) and 87.1% of their NDCG@10 (0.0322). Valid@Beam 0.989. |
+| 2026-07-07 | 🏆 **FINAL: Enc-dec + sentence-t5-XXL IDs (bf16 local) + RQ-VAE + dedup, cosine 100ep/warmup 5k** | 0.03398 | **0.05263** | 0.07651 | **0.02920** | 0.04278 | ✅✅ **Campaign best: 87.6% of LIGER's HR@10 (0.0601), 90.7% of their NDCG@10 (0.0322).** XXL embeddings (encoder-only 4.8B fits 16GB in bf16) add +5.9% HR@10 over t5-base IDs; shortened cosine aligns LR decay with the observed ~35-epoch convergence window (val peak 0.04278 @35, best val of campaign). Valid@Beam 0.990. Early stop @85, epoch-35 weights. |
+
+### Campaign summary: closing the Beauty TIGER gap (2026-07-07)
+
+Goal: reproduce LIGER-paper TIGER on Beauty (HR@10=0.0601, NDCG@10=0.0322). Result: **0.03886 -> 0.05263 HR@10 (+35.4%)**, reaching 87.6%/90.7% of the target.
+
+**Effective levers (stacked, in order of adoption):**
+1. Rich-text Semantic IDs (title+brand+category+price -> Sentence-T5) — +12% (earlier A/B/C/D experiment)
+2. RQ-VAE quantizer (per-dim standardization of the L2-normalized T5 embeddings is REQUIRED — raw scale collapses the codebook to 3/5/9 codes) + dedup 4th token (collisions -> 0)
+3. LIGER regularization recipe (d_model 128, dropout 0.2) — +22%; overfitting was the binding constraint masking all ID-side gains
+4. T5-style encoder-decoder architecture (6+6, d_kv 64x6=384) — +3-7% over decoder-only
+5. sentence-t5-XXL item embeddings (bf16, fits 16GB locally) — +5.9%
+6. Cosine schedule matched to the actual convergence window (100 epochs, warmup 5k) instead of the paper's 200k-step budget
+
+**Ruled out empirically (9 hypotheses):** under-training/model size (10x budget: flat), user-id token (-35%; LIGER's own config sets include_user_id=False), description field (-10%; LIGER also excludes it), t5-large IDs (-10%), front-weighted level loss (-15%), beam widening (0), decode-side collision expansion (backfires at high collision rates), 3x attention width alone (0), LIGER's RQ-VAE hyperparams on our linear-encoder RQ-VAE (worse — theirs is an MLP encoder).
+
+**Remaining -12% gap, attributed to:** (a) LIGER's "extensive hyperparameter search" (their words), (b) their MLP RQ-VAE encoder (hidden [768,512,256], 8000 epochs, batch 2048) vs our linear encoder, (c) possible eval-protocol deltas (they exclude cold-start items from the in-set metric; ~0.6% of our test targets are cold). The per-lever causal chain above is fully reproducible from the checkpoints + hash-bound Semantic-ID files in data/.
