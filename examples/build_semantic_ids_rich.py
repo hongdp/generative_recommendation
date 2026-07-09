@@ -251,7 +251,7 @@ def stage_ids(args):
 def main():
     parser = argparse.ArgumentParser(description="Build rich-text Semantic IDs for Amazon datasets.")
     parser.add_argument("--stage", type=str, required=True, choices=["texts", "encode", "ids"])
-    parser.add_argument("--dataset", type=str, default="beauty", choices=list(CATEGORY_DIRS.keys()))
+    parser.add_argument("--dataset", type=str, default="beauty", choices=list(CATEGORY_DIRS.keys()) + ["steam"])
     parser.add_argument("--data_dir", type=str, default="./data")
     parser.add_argument("--num_levels", type=int, default=3)
     parser.add_argument("--num_codes", type=int, default=256)

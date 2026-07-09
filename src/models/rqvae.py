@@ -1,9 +1,25 @@
 """Residual Quantized Variational Autoencoder (RQ-VAE) implementation in Flax."""
 
-from typing import Dict, Tuple
+from typing import Dict, Sequence, Tuple
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+
+
+class _MLP(nn.Module):
+    """ReLU MLP: hidden layers (with optional dropout) followed by a linear output."""
+
+    hidden_dims: Sequence[int]
+    out_dim: int
+    dropout_rate: float = 0.0
+
+    @nn.compact
+    def __call__(self, x, deterministic: bool = True):
+        for h in self.hidden_dims:
+            x = nn.relu(nn.Dense(h)(x))
+            if self.dropout_rate > 0:
+                x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic)
+        return nn.Dense(self.out_dim)(x)
 
 
 class RQVAE(nn.Module):
@@ -15,12 +31,17 @@ class RQVAE(nn.Module):
         num_codes: Codebook vocabulary size per level (K).
         embedding_dim: Dimension of the input/output item text embeddings.
         commitment_weight: Weight of commitment loss.
+        hidden_dims: Optional MLP hidden sizes for the encoder (LIGER: [768, 512, 256]).
+            The decoder mirrors them in reverse. Empty = original single-Dense behavior.
+        dropout_rate: Dropout inside the MLP hidden layers (LIGER: 0.1).
     """
     latent_dim: int
     num_levels: int
     num_codes: int
     embedding_dim: int
     commitment_weight: float = 0.25
+    hidden_dims: Tuple[int, ...] = ()
+    dropout_rate: float = 0.0
 
     def setup(self):
         # Codebooks shape: [num_levels, num_codes, latent_dim]
@@ -30,10 +51,26 @@ class RQVAE(nn.Module):
             nn.initializers.variance_scaling(1.0, "fan_avg", "uniform"),
             (self.num_levels, self.num_codes, self.latent_dim)
         )
-        self.encoder = nn.Dense(self.latent_dim, name="encoder")
-        self.decoder = nn.Dense(self.embedding_dim, name="decoder")
+        if self.hidden_dims:
+            self.encoder = _MLP(self.hidden_dims, self.latent_dim,
+                                self.dropout_rate, name="encoder")
+            self.decoder = _MLP(tuple(reversed(self.hidden_dims)), self.embedding_dim,
+                                self.dropout_rate, name="decoder")
+        else:
+            self.encoder = nn.Dense(self.latent_dim, name="encoder")
+            self.decoder = nn.Dense(self.embedding_dim, name="decoder")
 
-    def __call__(self, x: jnp.ndarray) -> Dict[str, jnp.ndarray]:
+    def _encode_z(self, x, deterministic: bool = True):
+        if self.hidden_dims:
+            return self.encoder(x, deterministic=deterministic)
+        return self.encoder(x)
+
+    def _decode_z(self, z, deterministic: bool = True):
+        if self.hidden_dims:
+            return self.decoder(z, deterministic=deterministic)
+        return self.decoder(z)
+
+    def __call__(self, x: jnp.ndarray, deterministic: bool = True) -> Dict[str, jnp.ndarray]:
         """Runs the autoencoder forwarding pass (encoding, quantization, decoding).
 
         Args:
@@ -47,7 +84,7 @@ class RQVAE(nn.Module):
               - 'commitment_loss': Encoder commitment loss (mean scalar).
         """
         # 1. Project input to latent space
-        z = self.encoder(x)  # [batch_size, latent_dim]
+        z = self._encode_z(x, deterministic=deterministic)  # [batch_size, latent_dim]
 
         # 2. RVQ Quantization loop
         residuals = z
@@ -87,7 +124,7 @@ class RQVAE(nn.Module):
             residuals = residuals - e_c_ste
 
         # 3. Decode quantized sum back to reconstruction space
-        x_recon = self.decoder(quantized_sum)  # [batch_size, embedding_dim]
+        x_recon = self._decode_z(quantized_sum, deterministic=deterministic)  # [batch_size, embedding_dim]
         indices_array = jnp.stack(all_indices, axis=-1)  # [batch_size, num_levels]
 
         return {
@@ -106,7 +143,7 @@ class RQVAE(nn.Module):
         Returns:
             indices: Quantized index tuples, shape (batch_size, num_levels).
         """
-        z = self.encoder(x)
+        z = self._encode_z(x, deterministic=True)
         residuals = z
         all_indices = []
 

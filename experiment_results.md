@@ -64,6 +64,8 @@ This file documents all training runs, evaluations, and benchmarks. Refer to [SK
 | 2026-07-03 | Full TIGER (Seq2Seq) (blocks=4, embed=384) on STEAM | Local (GeForce RTX 4080) | 0.16417 | 0.14404 | 0.19431 | 0.15373 | 0.23235 | 0.16334 | 0.14404 | ✅ CORRECTED re-run (30 epochs) with consistent RQ-VAE Semantic IDs + fixed pipeline (checkpoint↔ID hash binding, best-ckpt eval, decode-validity guard). Valid@1=1.0, Valid@Beam=0.99998; HR grows normally with K (0.164→0.194→0.232). Now competitive with standard TIGER (HR_5=0.158) and just below HSTU (0.173). Best Val NDCG_10=0.17724. |
 | 2026-06-07 | TIGER RL-CoT (End-to-End Latent Routing) on STEAM | Local (GeForce RTX 4080) | 0.00042 | 0.00036 | 0.00050 | 0.00039 | 0.00063 | 0.00042 | 0.00036 | ❌ FAILED RUN — training collapsed. Metrics ≈ random (Steam ~10k items → random HR_10≈0.001). Best Val NDCG_10=0.00066. Not a replication; kept only as a record of the failed experiment. |
 
+| 2026-07-08 | 🏆 **Winning stack on STEAM** (rich text title+genres+tags+specs+price+publisher → t5-XXL bf16 → MLP RQ-VAE → dedup L4; enc-dec 6+6 128d dropout 0.2, cosine 3e-4) | 0.17347 | 0.15103 | 0.20771 | 0.16203 | 0.25447 | 0.17382 | 0.15139 | ✅✅✅ **Generalization confirmed on dense data: +6.9% HR@10 over our prior seq2seq (0.19431), +9.4% over LIGER-paper steam TIGER (0.18980; we are at 109% of their number), beats the random-ID ceiling (0.19966) AND edges out HSTU (0.20735/0.16159) — first TIGER-family win over dense retrieval on Steam.** ID stats: 2.42% collisions, full codebooks, Valid@Beam 0.99998. |
+
 ## Known Issues & Caveats (added 2026-07-02 during results review)
 
 - **⚠️ Amazon TIGER underperforms published TIGER by ~2×.** On Beauty/Sports/Toys, our HSTU rows nearly match the *published TIGER* numbers (e.g. Beauty HSTU 0.04507/0.03208/0.06479/0.03844 ≈ TIGER paper's TIGER), while our own TIGER (VAE **and** K-Means) lands at roughly half (Beauty ~0.0246/0.0167/0.0379/0.0210). This gap is consistent across all three Amazon datasets. On Steam the TIGER/HSTU gap is only ~10% (expected), so the problem is specific to the sparse Amazon setting.
@@ -169,6 +171,27 @@ Conclusion: collision expansion is **not a free win** — reachability gains are
 | 2026-07-07 | **Enc-dec (T5-style 6+6, embed 128, attn 384=64x6, dropout 0.2) + RQ-VAE+dedup IDs, cosine 3e-4** | 0.03327 | **0.04972** | 0.07374 | **0.02804** | 0.04062 | ✅ **NEW BEST — architecture switch works (+3.2% HR@10 / +6.9% NDCG@10 over combo).** Best val at epoch 40 (0.04062, highest of campaign) then declines; run killed at 90, best ckpt evaluated. Now at 82.7% of LIGER's HR@10 (0.0601) and 87.1% of their NDCG@10 (0.0322). Valid@Beam 0.989. |
 | 2026-07-07 | 🏆 **FINAL: Enc-dec + sentence-t5-XXL IDs (bf16 local) + RQ-VAE + dedup, cosine 100ep/warmup 5k** | 0.03398 | **0.05263** | 0.07651 | **0.02920** | 0.04278 | ✅✅ **Campaign best: 87.6% of LIGER's HR@10 (0.0601), 90.7% of their NDCG@10 (0.0322).** XXL embeddings (encoder-only 4.8B fits 16GB in bf16) add +5.9% HR@10 over t5-base IDs; shortened cosine aligns LR decay with the observed ~35-epoch convergence window (val peak 0.04278 @35, best val of campaign). Valid@Beam 0.990. Early stop @85, epoch-35 weights. |
 
+| 2026-07-08 | 🏆 **MLP RQ-VAE IDs (LIGER arch: hidden 768→512→256→128, dropout 0.1, 8000ep) + enc-dec + short cosine** | 0.03720 | **0.05558** | 0.08273 | **0.03078** | 0.04542 | ✅✅✅ **New campaign best — 92.5% of LIGER's HR@10, 95.6% of their NDCG@10.** The MLP encoder lifts L1 codebook utilization 54%→99% (fixes the density-concentration dead-code problem the linear encoder could not), directly attacking the diagnosed L1 bottleneck. +5.6% HR@10 over the linear-VAE XXL run. Val peak 0.04542 @ep30 (campaign high); run stopped at 46 on the declining tail, epoch-30 ckpt evaluated. |
+
+| 2026-07-08 | **Category-direct (lookup) SIDs**: L1=depth-3 taxonomy (46), L2=leaf-in-parent, L3=residual-KMeans (category-mean removed), L4=dedup — ZERO training | 0.03483 | 0.05505 | 0.08358 | 0.02994 | — | ✅ **Within 1-3% of the campaign-best learned quantizer (HR@20 even +1%), at zero training cost.** Answers "why not use labels directly": taxonomy prefixes carry most of the generalization value (human categories ≈ distilled behavioral structure); 55% 3-level collisions are absorbed by the frequency-ordered dedup level. Early stop @70. Valid@Beam 0.996. |
+
+| 2026-07-08 | **MGCL SIDs** (UniSID-style: 3 linear heads over XXL emb, per-level SupCon [depth-3 cat / leaf cat / instance-discrimination views] + usage-entropy bonus, argmax codes) | 0.03331 | 0.04807 | 0.06739 | 0.02808 | — | Learned taxonomy-contrastive IDs: excellent ID stats (3.5% collisions, L1 99% usage, dedup groups ≤5) and the **best HR@1 of the campaign (0.01306)**, but −14% HR@10 / −9% NDCG@10 vs MLP RQ-VAE. Sharp instance-separated codes trade deep-rank recall for top-rank precision. Early stop @75. |
+
+### SID-construction three-way ablation on Beauty (2026-07-08)
+
+Same downstream everything (enc-dec 6+6 128d, dropout 0.2, cosine, dedup 4th level); only the 3 semantic levels differ:
+
+| Family | Method | Train cost | 3-lvl collisions | HR@1 | HR@10 | NDCG@10 |
+|:--|:--|:--|--:|--:|--:|--:|
+| RQ (residual quantization) | MLP RQ-VAE on XXL emb | 8000-ep VAE | 4.3% | 0.01225 | **0.05558** | **0.03078** |
+| Lookup (taxonomy-direct) | depth-3 cat / leaf / residual-KMeans | **zero** | 55.5% | 0.01181 | 0.05505 | 0.02994 |
+| Contrastive (UniSID-style) | MGCL 3 heads, argmax codes | 2000 steps | **3.5%** | **0.01306** | 0.04807 | 0.02808 |
+
+Takeaways:
+1. **Zero-training taxonomy lookup reaches 97-99% of the best learned quantizer** — with a curated category tree, SID sophistication buys very little; human taxonomy ≈ pre-distilled behavioral structure. High raw collisions (55%) are absorbed by the frequency-ordered dedup level.
+2. **MGCL trades recall for precision**: instance-discrimination L3 makes codes maximally separated (best HR@1, near-zero collisions) but the sharper partition loses the smooth prefix-neighborhoods that deep-rank recall rides on (−14% HR@10).
+3. RQ's residual structure remains the best HR@10/NDCG@10 — its levels factorize variance (coarse→fine of the SAME geometry), which beam search exploits better than parallel independently-supervised heads.
+
 ### Campaign summary: closing the Beauty TIGER gap (2026-07-07)
 
 Goal: reproduce LIGER-paper TIGER on Beauty (HR@10=0.0601, NDCG@10=0.0322). Result: **0.03886 -> 0.05263 HR@10 (+35.4%)**, reaching 87.6%/90.7% of the target.
@@ -182,5 +205,7 @@ Goal: reproduce LIGER-paper TIGER on Beauty (HR@10=0.0601, NDCG@10=0.0322). Resu
 6. Cosine schedule matched to the actual convergence window (100 epochs, warmup 5k) instead of the paper's 200k-step budget
 
 **Ruled out empirically (9 hypotheses):** under-training/model size (10x budget: flat), user-id token (-35%; LIGER's own config sets include_user_id=False), description field (-10%; LIGER also excludes it), t5-large IDs (-10%), front-weighted level loss (-15%), beam widening (0), decode-side collision expansion (backfires at high collision rates), 3x attention width alone (0), LIGER's RQ-VAE hyperparams on our linear-encoder RQ-VAE (worse — theirs is an MLP encoder).
+
+**Cross-dataset validation (2026-07-08):** the winning stack transferred to STEAM (dense regime) at full strength — HR@10 0.20771 / NDCG@10 0.16203, exceeding the LIGER paper's steam TIGER by 9.4%/7.8% and beating HSTU. The improvements are general, not sparse-data-specific; even the earlier "random IDs match semantic IDs on Steam" finding is overturned by the upgraded ID pipeline (+4% over the random-ID ceiling).
 
 **Remaining -12% gap, attributed to:** (a) LIGER's "extensive hyperparameter search" (their words), (b) their MLP RQ-VAE encoder (hidden [768,512,256], 8000 epochs, batch 2048) vs our linear encoder, (c) possible eval-protocol deltas (they exclude cold-start items from the in-set metric; ~0.6% of our test targets are cold). The per-lever causal chain above is fully reproducible from the checkpoints + hash-bound Semantic-ID files in data/.

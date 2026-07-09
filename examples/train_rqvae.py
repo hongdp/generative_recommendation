@@ -25,6 +25,8 @@ def main():
     parser.add_argument("--latent_dim", type=int, default=32, help="RQ-VAE latent dimension (LIGER uses 128).")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size (LIGER uses 2048).")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="If >0, use AdamW with this weight decay (LIGER: 0.1).")
+    parser.add_argument("--hidden_dims", type=str, default="", help="Comma-separated MLP encoder hidden sizes, e.g. \"768,512,256\" (LIGER). Empty = linear encoder.")
+    parser.add_argument("--rqvae_dropout", type=float, default=0.0, help="Dropout in MLP hidden layers (LIGER: 0.1).")
     args = parser.parse_args()
 
     print(f"--- Training RQ-VAE for TIGER Semantic IDs on {args.dataset} ---")
@@ -69,12 +71,17 @@ def main():
     embedding_dim = embeddings.shape[-1]
     
     print(f"Initializing RQ-VAE (latent={latent_dim}, levels={num_levels}, codes={num_codes})...")
+    hidden_dims = tuple(int(h) for h in args.hidden_dims.split(",")) if args.hidden_dims else ()
+    if hidden_dims:
+        print(f"MLP encoder hidden dims: {hidden_dims}, dropout {args.rqvae_dropout}")
     model = RQVAE(
         latent_dim=latent_dim,
         num_levels=num_levels,
         num_codes=num_codes,
         embedding_dim=embedding_dim,
         commitment_weight=0.25,
+        hidden_dims=hidden_dims,
+        dropout_rate=args.rqvae_dropout,
     )
 
     key = jax.random.PRNGKey(args.seed)
@@ -91,10 +98,16 @@ def main():
     opt_state = optimizer.init(params)
 
     # 5. Define JIT training step
+    use_dropout = bool(hidden_dims) and args.rqvae_dropout > 0
+
     @jax.jit
-    def train_step(params, opt_state, batch_x):
+    def train_step(params, opt_state, batch_x, dropout_key):
         def loss_fn(p):
-            outputs = model.apply({"params": p}, batch_x)
+            if use_dropout:
+                outputs = model.apply({"params": p}, batch_x, deterministic=False,
+                                      rngs={"dropout": dropout_key})
+            else:
+                outputs = model.apply({"params": p}, batch_x)
             recon_loss = jnp.mean((outputs["x_recon"] - batch_x) ** 2)
             codebook_loss = outputs["codebook_loss"]
             commitment_loss = outputs["commitment_loss"]
@@ -134,8 +147,9 @@ def main():
             batch_x = shuffled_x[i : i + batch_size]
             # Convert to jax array
             batch_x_jax = jnp.array(batch_x)
+            key, step_key = jax.random.split(key)
             params, opt_state, loss_val, recon_val, code_val, commit_val = train_step(
-                params, opt_state, batch_x_jax
+                params, opt_state, batch_x_jax, step_key
             )
             
             # Accumulate scalars asynchronously
