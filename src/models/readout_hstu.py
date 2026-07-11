@@ -101,6 +101,7 @@ class ReadoutHSTUModel(nn.Module):
     linear_dropout_rate: float = 0.1
     num_rel_buckets: int = 64
     tie_output: bool = False
+    feat_zero_init: bool = False
 
     @nn.compact
     def __call__(
@@ -109,6 +110,8 @@ class ReadoutHSTUModel(nn.Module):
         mask: jnp.ndarray,       # [batch, N, N] bool
         rel_idx: jnp.ndarray,    # [N, N] int32
         deterministic: bool = True,
+        feats: jnp.ndarray = None,       # optional [batch, N, F] request-side features
+        feat_mask: jnp.ndarray = None,   # [batch, N, 1], 1 where feats apply (branch rows)
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         embed_layer = nn.Embed(
             num_embeddings=self.num_items + 2,
@@ -116,6 +119,13 @@ class ReadoutHSTUModel(nn.Module):
             name="item_embedding",
         )
         x = embed_layer(tokens)
+        if feats is not None:
+            # Request-side conditioning of readout tokens (design doc §10):
+            # a learned projection added onto the <begin> input embeddings only.
+            # Zero init makes step 0 exactly the unconditioned baseline (the
+            # same symmetry-breaking logic as alpha_init in the reinject arm).
+            init = nn.initializers.zeros if self.feat_zero_init else nn.linear.default_kernel_init
+            x = x + nn.Dense(self.embedding_dim, name="feat_proj", kernel_init=init)(feats) * feat_mask
 
         for i in range(self.num_blocks):
             x = MaskedHSTUBlock(

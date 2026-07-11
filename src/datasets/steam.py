@@ -197,7 +197,12 @@ class SteamDataLoader:
             self.num_items = cache_data["num_items"]
             self.token_to_title = cache_data["token_to_title"]
             self.user_history = cache_data["user_history"]
-            return
+            if "user_timestamps" in cache_data:
+                self.user_timestamps = cache_data["user_timestamps"]
+                return
+            # Older cache without timestamps: fall through to a full rebuild
+            # (deterministic pipeline -> identical mappings/history, now + timestamps).
+            print("Cache lacks user_timestamps; rebuilding Steam dataset...")
 
         # Download & parse raw files
         reviews_path, games_path = download_steam_files(data_dir)
@@ -231,15 +236,27 @@ class SteamDataLoader:
         }
         self.token_to_title[0] = "<pad>"  # Padding token
 
-        # Group interactions by mapped user ID, sorted by timestamp (date)
+        # Group interactions by mapped user ID, sorted by timestamp (date).
+        # user_timestamps holds days-since-epoch aligned with user_history
+        # (-1 where the raw record had no date and sorted by line number).
+        from datetime import date as _date
+        def _date_to_days(s):
+            try:
+                y, m, d = int(s[0:4]), int(s[5:7]), int(s[8:10])
+                return (_date(y, m, d) - _date(1970, 1, 1)).days
+            except Exception:
+                return -1
         self.user_history = {}
+        self.user_timestamps = {}
         for x in raw_interactions:
             user_id = self.user_to_id[x["user"]]
             item_id = self.item_to_id[x["item"]]
 
             if user_id not in self.user_history:
                 self.user_history[user_id] = []
+                self.user_timestamps[user_id] = []
             self.user_history[user_id].append(item_id)
+            self.user_timestamps[user_id].append(_date_to_days(x["date"]))
 
         # Save to cache file
         cache_data = {
@@ -251,6 +268,7 @@ class SteamDataLoader:
             "num_items": self.num_items,
             "token_to_title": self.token_to_title,
             "user_history": self.user_history,
+            "user_timestamps": self.user_timestamps,
         }
         print(f"Saving preprocessed Steam dataset to cache: {cache_path}...")
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)

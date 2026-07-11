@@ -489,3 +489,59 @@ The composition identity closes on both sides: item reaches 0.0354 as a *transit
 - §1.5 / §11.3-c′'s prediction "α ≈ 0 on aggregation-weighted data" used the wrong observable: α measures how much transition computation the model *routes* through the direct path, not how much the data *needs* it — routing is free, so α grows wherever the path is useful for optimization, including Steam. The falsifiable content survives at the behavioral level (slice metrics), which is where it was confirmed. Parameter-value predictions on non-identifiable gates should be avoided in future design docs.
 - The mixture-weight remedy is validated at ALL-slice level but the *transition-memorization* component specifically requires the prior inside the joint training path, not appended at readout. The natural next ablation (beyond §11.3's list) is a **dedicated transition table**: score $+\ \alpha\langle e_{\text{trans}}(x_t), e_{\text{out}}(y)\rangle$ with a third, untied table $E_{\text{trans}}$ — an explicit FPMC factor whose gradients are not shared with the input role. Predicted to recover bigram_in toward 0.367 while keeping the clean readout and the complement gains; parameter cost one extra table, compute cost nil.
 - The Steam convergence speedup (best epoch 12 → 5 at parity) suggests reporting **compute-to-quality** alongside final quality in all subsequent ablations (§5's evaluation corollary, now with direct evidence).
+
+### 13.10 Direct-term logit decomposition — quantifying "how much of the model is a bigram machine"
+
+New diagnostic (extends §9.2), run on all six item/begin checkpoints per dataset (3 seeds averaged). Decompose the anchored readout's scoring into the zero-layer direct path and the rest: retrieve once with the full readout, once with the pure direct term $e_{\text{in}}(x_t) E_{\text{out}}^\top$ (§1.5-ii's free transition matrix), and once with the readout minus its $e_{\text{in}}(x_t)$ projection.
+
+| Dataset / arm | markov-only HR@10 (share of full) | resid-only (share) | proj-frac of ‖h‖ | hit-agree@10 | overlap@10 |
+|---|---|---|---|---|---|
+| Beauty, item | 0.02731 (**55.7%**) | 0.04305 (87.7%) | 30.6% | 39.1% | 9.9% |
+| Beauty, begin (control) | 0.00100 (2.0%) | 0.04946 (99.6%) | 5.5% | 0.1% | 0.2% |
+| Steam, item | 0.13674 (**68.3%**) | 0.12546 (62.7%) | **59.5%** | **65.6%** | 12.8% |
+| Steam, begin (control) | 0.00097 (0.5%) | 0.20221 (99.9%) | 6.8% | 0.2% | 0.2% |
+
+Readings:
+
+1. **The anchored model is substantially a bigram machine.** A zero-layer lookup through the model's own tables — no attention, no depth — reproduces 68% of the item arm's HR@10 on Steam and 66% of its actual hits; on Beauty, 56% / 39%. On Steam the direct direction carries **59.5% of the readout vector's norm**.
+2. **Redundancy structure differs by regime.** On Beauty, resid-only keeps 87.7% (attention re-encodes much of the transition signal — the direct path is partly redundant); on Steam, resid-only (62.7%) < markov-only (68.3%) — the direct path is the *primary* carrier and attention does not duplicate it.
+3. **The begin-arm control is decisive**: with no identity path, the same measurement collapses to 0.5–2% — the direct-term dominance in the item arm is architectural, not a property of the data or tables per se.
+4. **Low overlap@10 (10–13%) with high hit-agree (39–66%)** is the expected signature: the two rankers disagree across their (mostly wrong) tails but agree precisely on the hits, i.e. the direct term is where the item arm's correct answers come from.
+
+Practical use: this diagnostic answers "is long-context extension pointless for this model?" *before* paying for a long-context training run — a model whose hits are 60%+ direct-term-explained cannot benefit from more history in its dominant scoring component, since $e_{\text{in}}(x_t)$ uses exactly one event. Recommended as the first white-box check (alongside the §13.8 slice composition and last-item-only truncation) when diagnosing context-length insensitivity in production anchored-readout models.
+
+### 13.11 Request-side conditioning of `<begin>` (§10) — the largest single lever measured in this campaign
+
+Per the production constraints under discussion (no user-id embedding — cold-start; no sequence-derived aggregates — ceiling lock-in), the only injectable signal in the public datasets is the **fork's request time** (§3.2: the label event's timestamp, known trivially at serving). Implementation: 6 features (weekly + annual sin/cos, train-range-normalized linear time, validity flag) through a learned projection added onto `<begin>` input embeddings only; item streams untouched. Two variants: default (LeCun) vs **zero-initialized** projection (training starts exactly at the unconditioned baseline — the same symmetry-breaking logic that fixed α's sign basin in §13.9).
+
+**Steam, 3 seeds:** HR@10 **0.26161**, NDCG@10 **0.19240** — **+29.2% / +21.9% over the begin baseline**, and +26% over every prior model in this repository (best TIGER stack 0.2077, HSTU 0.2074). Mechanism verified by a shuffle test on the trained model: true time 0.263, time shuffled across samples 0.162 (collapses *below* the no-time baseline 0.202 — wrong dates actively mislead, so the model genuinely conditions on the clock), zero features 0.00005 (OOD input destroys the readout — production deployments need feature-missing robustness: feature dropout in training or fallback). Steam consumption is release/sale-driven and the dataset spans years; a date-conditioned popularity prior is worth a third of the baseline's entire performance.
+
+**Beauty, 3 seeds — initialization decides everything:**
+
+| Variant | val NDCG@10 | HR@5 | HR@10 | NDCG@10 | HR@20 | MRR |
+|---|---|---|---|---|---|---|
+| begin baseline | 0.04225 | 0.03455 | 0.04964 | 0.02898 | 0.07010 | 0.02659 |
+| item baseline | 0.04016 | 0.03542 | 0.04907 | 0.02980 | 0.06705 | 0.02743 |
+| +time, default init | 0.03812 (unstable, epochs 51–141) | 0.03345 | 0.05102 | 0.02767 | 0.07276 | 0.02457 |
+| **+time, zero init** | **0.04570** | **0.03835** | **0.05605** | **0.03198** | **0.07980** | **0.02886** |
+
+With random projection init the weak day-granularity signal mostly injects optimization noise (val below baseline in 2/3 seeds, erratic best epochs). Zero init pins the starting point to the baseline and lets the data grow the pathway — and the result is a **uniform new Beauty best across all seven metrics and all arms**, including the top-rank precision that neither the clean begin arm nor α-re-injection could recover (HR@5 0.03835 vs item 0.03542, +8.3%; NDCG@5 0.02629 vs 0.02542). The §13.6-2 precision regression is closed *without* any transition-prior machinery — request-time context alone did it, stably (epochs 21–41, tight seed spread).
+
+**Verdict:** the §10 request-side conditioning channel is validated end-to-end and is the largest single lever measured in this campaign (+29% dense, +13% sparse over the begin baseline). Its value is independent of the leakage magnitude — it applies equally to models whose anchoring diagnostics come back clean. Engineering rules discovered: (1) zero-init every additive conditioning pathway (third instance of the pattern: α basins, feature projections); (2) train with feature-missing robustness before deploying; (3) request-time features at train time must be per-fork event-time values (§3.7), never training-time constants.
+
+### 13.12 Late-fusion ablation — where in the network does request time act?
+
+§13.11 established *that* request-time conditioning is the largest lever; this ablation asks *where* the signal earns its keep. Two placements of the same 6 features:
+
+- **Input mode** (§13.11's config): features projected onto the `<begin>` *input* embedding — time is visible to every attention layer, so it can change **what the readout aggregates** (e.g. attend to seasonal history when the request is seasonal).
+- **Late mode** (`--time_mode late`): the transformer runs unconditioned; a residual MLP head fuses time into the finished readout vector, $q = h + \text{MLP}([h; t])$ with zero-init output layer (the §13.11 rule applied to the head). Time can only **transform a fixed summary and add a time prior** — it cannot change the aggregation.
+
+**Steam, 2 seeds:** late fusion reaches HR@10 **0.24162** / NDCG@10 **0.17948** (seeds 0.24072/0.24252 — tight), vs the begin baseline 0.20246 and input mode 0.26161. In gain terms: late fusion recovers **66% of the input-mode improvement**; the remaining **34% strictly requires time inside the transformer**.
+
+Readings:
+
+1. **The majority of the request-time benefit is a separable serving-time transform.** Two-thirds of the gain needs no architecture change at all — a small residual MLP over an already-trained-style readout captures the date-conditioned popularity prior. This matters for production retrofits: an existing frozen-backbone deployment can bank most of the win with a head-only change (though this run trains backbone+head jointly; a frozen-backbone variant is the natural follow-up before claiming that literally).
+2. **A third of the gain is aggregation conditioning.** The input-mode surplus (0.2416 → 0.2616) is the part where time changes *which history* the readout summarizes, not just how the summary is scored. This is the component that motivates §10's design (conditioning the readout token itself) over a post-hoc feature cross.
+3. **Diagnostics stay clean in both modes** (readout leak 0.04–0.06 late vs −0.04 input; both far from the item arm's 0.3–0.6 self-leak), so the comparison is not confounded by the leakage mechanism.
+
+Not yet run: the 3-cell factorization isolating the residual connection from the zero-init (`--late_w2_std`, `--late_no_residual`), and the Beauty late arm. Predicted ordering from the §13.11 init result: residual+zero-init ≥ residual+std-init > no-residual, with the gap largest on sparse data.

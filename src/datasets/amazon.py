@@ -201,9 +201,13 @@ class AmazonDataLoader:
                 self.user_history[user_id] = []
             self.user_history[user_id].append((timestamp, item_id))
 
-        # Sort histories chronologically and extract item IDs
+        # Sort histories chronologically and extract item IDs, keeping a
+        # parallel per-user timestamp list (unix seconds) aligned index-by-index
+        # with user_history for request-time features.
+        self.user_timestamps = {}
         for user_id in self.user_history:
             self.user_history[user_id].sort(key=lambda x: x[0])
+            self.user_timestamps[user_id] = [ts for ts, _ in self.user_history[user_id]]
             self.user_history[user_id] = [item_id for _, item_id in self.user_history[user_id]]
 
     def get_split(
