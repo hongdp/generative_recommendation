@@ -4,6 +4,19 @@ A high-performance sequential recommendation library built using JAX and Flax, f
 1. **HSTU (Hierarchical Sequential Transduction Unit)**: The index-based sequence model reported in the ICML 2024 paper.
 2. **TIGER (Generative Retrieval)**: A generative recommendation framework using Semantic ID quantization (supporting both RQ-VAE and RQ-KMeans).
 3. **SASRec-style Transformer**: Standard causal attention model architecture.
+4. **Readout-token HSTU**: A two-tower retrieval variant that moves the readout off the last item's residual stream onto dedicated anchor-masked `<begin>` tokens, with optional request-time conditioning (see [dedicated_readout_token_design.md](dedicated_readout_token_design.md)).
+
+---
+
+## 📊 Current Best Results (test, leave-one-out)
+
+| Dataset | Best model | HR@10 | NDCG@10 | Notes |
+|---|---|---|---|---|
+| Amazon Beauty | Readout-HSTU `<begin>` + zero-init request-time | **0.05605** | **0.03198** | New repo best on all 7 metrics (2026-07-09, 3 seeds) |
+| Amazon Beauty | TIGER (rich XXL IDs + std-RQ-VAE + dedup) | 0.0526 | — | 87.6% of the LIGER-paper TIGER (0.0601) |
+| Steam | Readout-HSTU `<begin>` + request-time | **0.26161** | **0.19240** | +26% over the prior repo best (TIGER 0.2077 / HSTU 0.2074) |
+
+Full run-by-run records live in [experiment_results.md](experiment_results.md); analysis lives in [dedicated_readout_token_design.md](dedicated_readout_token_design.md) §13.
 
 ---
 
@@ -30,13 +43,16 @@ PYTHONPATH=src pytest
 
 * `src/`: Core library modules.
   * `datasets/`: Preprocessing, sequence splitting, and data loading pipelines for **MovieLens-1M**, **Amazon (Beauty, Sports, Toys)**, and **Steam** datasets.
-  * `models/`: Implementations of `HSTUModel`, `TransformerModel`, `TIGERModel`, and `RQVAE`.
+  * `models/`: Implementations of `HSTUModel`, `TransformerModel`, `TIGERModel`, `ReadoutHSTUModel`, and `RQVAE`.
   * `evaluation/`: Evaluator components computing standard ranking metrics: Hit Rate (HR_K), Normalized Discounted Cumulative Gain (NDCG_K), and Mean Reciprocal Rank (MRR).
 * `examples/`: Train & evaluation runner scripts.
   * **Index-Based Models**:
     * `train_hstu.py`: Generic runner for index-based sequential architectures (`--model hstu` or `--model transformer`).
+    * `train_readout_hstu.py`: Dedicated readout-token A/B (`--readout item|begin`), with gated transition-prior re-injection (`--reinject`) and request-time conditioning of `<begin>` (`--time_features`, input or late fusion).
   * **Semantic ID Generation**:
-    * `train_rqvae.py` / `train_rqkmeans.py`: Semantic ID generation scripts using deep autoencoders or fast clustering.
+    * `train_rqvae.py` / `train_rqkmeans.py`: Semantic ID generation using RQ-VAE (linear or MLP encoder via `--hidden_dims`) or fast clustering.
+    * `build_semantic_ids_rich.py`: Semantic IDs from rich Amazon item text (title + brand + category + price) with Sentence-T5-XXL — the winning recipe in the Beauty TIGER-gap campaign.
+    * `build_semantic_ids_mgcl.py`: Multi-granularity contrastive Semantic IDs (UniSID-style MGCL without the MLLM backbone).
   * **Generative Discrete Models (TIGER family)**:
     * `train_tiger.py`: Standard TIGER model.
     * `train_tiger_seq2seq.py`: TIGER using standard encoder-decoder seq2seq architecture.
@@ -52,7 +68,7 @@ PYTHONPATH=src pytest
     * `run_all_experiments.py`: Script to automate ID generation, training, and evaluation across Amazon and Steam datasets.
 * `SKILL.md`: Documented JAX/Flax development guidelines, memory-efficient training rules, and experience log.
 * `experiment_results.md`: Complete comparative baseline records of all experiments.
-* `walkthrough.md`: Detailed analysis and destructive testing conclusions (e.g. Random IDs vs RQVAE IDs).
+* `dedicated_readout_token_design.md`: Design doc + running lab notebook for the readout-token line: dual-role interference theory, leakage diagnostics, transition-prior re-injection, direct-term logit decomposition, and request-time conditioning (§13 holds all empirical findings).
 
 ---
 
@@ -68,6 +84,19 @@ PYTHONPATH=src python examples/train_hstu.py --model hstu --dataset steam --epoc
 # Train standard Transformer on MovieLens-1M
 PYTHONPATH=src python examples/train_hstu.py --model transformer --dataset ml-1m --epochs 40
 ```
+
+#### Readout-token A/B (dedicated `<begin>` readout)
+```bash
+# Baseline arm: readout from the last item's own residual stream
+PYTHONPATH=src python examples/train_readout_hstu.py --dataset beauty --readout item
+
+# Clean arm: dedicated anchor-masked <begin> readout
+PYTHONPATH=src python examples/train_readout_hstu.py --dataset beauty --readout begin
+
+# Best known configuration: <begin> + zero-init request-time conditioning
+PYTHONPATH=src python examples/train_readout_hstu.py --dataset steam --readout begin --time_features --feat_zero_init
+```
+Each run appends a results row to `experiment_results.md` and logs leakage diagnostics (readout leak, table alignment). See the design doc for the full ablation map (§11) and findings (§13).
 
 ### 2. Generative Retrieval Model (TIGER)
 Generative retrieval first tokenizes items into discrete Semantic IDs, then trains the TIGER sequence-to-sequence model using teacher-forcing.
