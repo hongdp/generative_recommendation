@@ -545,3 +545,45 @@ Readings:
 3. **Diagnostics stay clean in both modes** (readout leak 0.04–0.06 late vs −0.04 input; both far from the item arm's 0.3–0.6 self-leak), so the comparison is not confounded by the leakage mechanism.
 
 Not yet run: the 3-cell factorization isolating the residual connection from the zero-init (`--late_w2_std`, `--late_no_residual`), and the Beauty late arm. Predicted ordering from the §13.11 init result: residual+zero-init ≥ residual+std-init > no-residual, with the gap largest on sparse data.
+
+### 13.12 Time-injection placement: early vs late vs both, with residual/init factorization
+
+Where should request-side features enter? Six arms, 3 seeds each (all zero-init unless noted):
+
+| Arm (HR@10, 3-seed mean) | Beauty | Steam |
+|---|---|---|
+| begin baseline (no time) | 0.04964 | 0.20246 |
+| early = `<begin>` input (zero-init / default-init) | 0.05605 / 0.05102 | — / **0.26161** |
+| late = residual MLP head, zero-init | **0.05849** | 0.24122 |
+| late, residual + std-init | 0.05675 | 0.23813 |
+| late, non-residual + std-init | 0.05327 | 0.23607 |
+| both (early + late, all zero-init) | **0.05852** | 0.25260 |
+
+Findings:
+
+1. **Placement is regime-dependent.** Steam (strong signal): early wins — late captures ~66% of the total gain (the date-conditioned popularity prior + summary transform), and the remaining ~1/3 is *time-conditioned aggregation* (attention itself knowing the date), reachable only from the input side. Beauty (weak signal): late wins outright — the useful content is a scoring-level drift prior, best injected nearest the logits; routing it through the backbone adds noise even when zero-initialized.
+2. **The residual/init factorization** (three-cell design, from-scratch training, equal hypothesis spaces — so any gap is pure optimization geometry, not warm-start stability): init effect (zero vs std | residual) = +3.1% Beauty / +1.3% Steam; residual-structure effect (residual vs not | std init) = +6.5% Beauty / +0.9% Steam. Ordering zero > std > non-residual holds in every cell and seed. Both factors are real; the residual identity-default is worth ~2× the init pin on sparse data. Rule: **additive pathways = residual form + zero-init last layer, both, always.**
+3. **Combining early + late is not additive — and the isolating cell resolved why.** Beauty: both ≈ late (0.05852 vs 0.05849 — late had already saturated the weak signal; the extra pathway costs nothing, the zero-init floor working as designed). Steam: both (0.25260) < early-default (0.26161), but the missing cell (Steam early + zero-init, 3 seeds) came back at **0.25396** (val 0.21487) — i.e. both ≈ early-zero (−0.5%, ~noise). The deficit was **not** late-head interference; it was the zero-init of the *input-side* pathway on a strong-signal dataset (−2.9% HR@10 vs default init, consistent across seeds).
+4. **Zero-init rule, refined by opposing evidence.** For the *late* head, zero-init beat standard init on BOTH datasets (+3.1% Beauty, +1.3% Steam). For the *early/input* pathway, zero-init helped enormously on weak-signal Beauty (+9.9% and rescued stability) but cost −2.9% on strong-signal Steam. The asymmetry is pathway depth: a near-output head receives immediate, strong gradients and grows to full size quickly from zero; an input-side projection is fed gradients only through the whole backbone chain — from zero it grows too conservatively to catch the default-init head start within an early-stopping budget. Refined rule: **zero-init additive pathways near the output unconditionally; for input-side pathways, zero-init is the uncertainty default (bounded downside ~3%, vs unbounded instability the other way) and a validated strong signal justifies standard init or zero-init plus an extended schedule.**
+5. Practical recipe: ship late first (near-zero serving cost, baseline-pinned floor); measure early−late offline to decide whether the encoder-side feature pipeline is worth building; do not assume stacking helps.
+
+### 13.13 Fair generative-vs-dense retrieval: identical backbone, identical supervision (E1 vs E2)
+
+Setup (§13.12 campaign design): same MaskedHSTU encoder (4×256), same item-level context tokens, same K-fork anchor-mask supervision (same positions, same targets), same optimizer/schedule. Only the output parameterization differs — E1: 1-token branch, dot product vs a learnable item table (12.1k/13.0k × 256 ≈ 3.1/3.3M params), sampled softmax M=1024. E2: 4-token branch teacher-forcing the target's 4-level Semantic ID (best MLP RQ-VAE dedup IDs), CE over 256 codes/level (0.26M head params), beam-30 trie decode at eval. E2 total params 5.47M vs E1 8.04M (−32%).
+
+**Results (3 seeds, mean):**
+
+| | HR@5 | HR@10 | NDCG@10 | HR@20 | MRR | val NDCG@10 |
+|---|---|---|---|---|---|---|
+| Beauty E1 dense | 0.03455 | 0.04964 | 0.02898 | 0.07010 | 0.02659 | 0.04225 |
+| Beauty E2 generative | 0.03477 | **0.05047** | 0.02916 | **0.07223** | 0.02640 | 0.04259 |
+| Steam E1 dense | 0.16859 | 0.20246 | 0.15784 | 0.25062 | 0.15321 | 0.18265 |
+| Steam E2 generative | 0.16873 | 0.20249 | 0.15784 | 0.24928 | 0.14884 | 0.18295 |
+
+**Verdict: on a level playing field the two retrieval paradigms are statistically indistinguishable.** Steam HR@10 differs by 0.00003 (≪ seed std) and NDCG@10 matches to five digits; Beauty tips +1.7% HR@10 / +3.0% HR@20 toward generative. The only consistent dense edge is Steam MRR (−2.9% for E2 — beam ranking is slightly weaker at rank 1-2 on dense data). Valid@Beam ≥ 99.96%.
+
+Implications:
+
+1. The historical TIGER-vs-HSTU gaps in this repository (and much of the literature's generative-vs-dense comparisons) were **stack differences, not paradigm differences** — encoder architecture, training-data construction, loss family, and tuning dominate; the output parameterization contributes almost nothing at matched conditions.
+2. Generative achieves parity with **32% fewer parameters** (256-way code heads replace the full-vocabulary output tower) — the constant-parameter-vs-vocabulary scaling is real and is the honest headline benefit at this scale, alongside serving-side differences (trie decode vs ANN) that offline metrics don't capture.
+3. Next discriminating tests (queued as E3-E5): input-representation 2×2 (do SIDs help as *inputs* rather than outputs?), popularity/cold-item slices (the semantic-sharing claim), hybrid decode-then-rerank, and vocabulary-scaling stress (paradigms should diverge as catalog size grows — 13k items may simply be too small to separate them).
