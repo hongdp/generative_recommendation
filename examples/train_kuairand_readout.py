@@ -120,7 +120,12 @@ def main():
     parser.add_argument("--linear_dim", type=int, default=2048, help="4x embedding_dim, matching production FFN ratio.")
     parser.add_argument("--dropout_rate", type=float, default=0.1)
     parser.add_argument("--num_negatives", type=int, default=1024)
-    parser.add_argument("--learning_rate", type=float, default=1e-3)
+    parser.add_argument("--learning_rate", type=float, default=3e-4,
+                        help="Peak LR. 1e-3 (the 4x256 academic default) diverges to NaN by step ~2500 "
+                             "at 5x512/seq128: unnormalized silu attention over 129 keys inflates "
+                             "activations (init loss 14 vs ln(1025)=6.9 random floor).")
+    parser.add_argument("--warmup_steps", type=int, default=2000)
+    parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--targets_per_epoch", type=int, default=2_000_000,
@@ -193,7 +198,15 @@ def main():
     print(f"Parameters: {n_params / 1e6:.2f}M")
 
     import optax
-    optimizer = optax.adamw(learning_rate=args.learning_rate, weight_decay=args.weight_decay)
+    sched = optax.join_schedules(
+        [optax.linear_schedule(0.0, args.learning_rate, args.warmup_steps),
+         optax.constant_schedule(args.learning_rate)],
+        [args.warmup_steps],
+    )
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(args.grad_clip),
+        optax.adamw(learning_rate=sched, weight_decay=args.weight_decay),
+    )
     opt_state = optimizer.init(params)
 
     @jax.jit
@@ -276,6 +289,9 @@ def main():
     best_val_ndcg, best_epoch, patience_counter, global_step = -1.0, 0, 0, 0
     best_path = os.path.join(args.exp_dir, "best_checkpoint.msgpack")
 
+    from torch.utils.tensorboard import SummaryWriter
+    writer = SummaryWriter(log_dir=os.path.join(args.exp_dir, "tensorboard"))
+
     for epoch in range(1, args.epochs + 1):
         pool = rng.choice(data.train_pool, args.targets_per_epoch, replace=False)
         t0, epoch_loss, nb = time.time(), 0.0, 0
@@ -285,9 +301,16 @@ def main():
             drop_rng, step_rng = jax.random.split(drop_rng)
             params, opt_state, loss = train_step(
                 params, opt_state, jnp.array(x), jnp.array(y), negs, step_rng)
-            epoch_loss += float(loss)
+            loss = float(loss)
+            if not np.isfinite(loss):
+                print(f"FATAL: non-finite loss at global step {global_step} — aborting")
+                log_metrics(fatal="nan_loss", step=global_step, epoch=epoch)
+                raise SystemExit(2)
+            epoch_loss += loss
             nb += 1
             global_step += 1
+            if global_step % 100 == 0:
+                writer.add_scalar("loss/train", loss, global_step)
             if nb % 1000 == 0:
                 print(f"  step {nb} | loss {epoch_loss / nb:.4f} | {nb * args.batch_size / (time.time() - t0):.0f} tgt/s")
         dt = time.time() - t0
@@ -300,6 +323,11 @@ def main():
         log_metrics(epoch=epoch, step=global_step, loss=round(avg_loss, 5),
                     val={k: round(v, 6) for k, v in val_results.items()},
                     leak_curve=leak, targets_per_sec=round(nb * args.batch_size / dt))
+        for m, s in val_results.items():
+            writer.add_scalar(f"val/{m}", s, global_step)
+        for li, lv in enumerate(leak):
+            writer.add_scalar(f"leak/layer_{li + 1}", lv, global_step)
+        writer.add_scalar("throughput/targets_per_sec", nb * args.batch_size / dt, global_step)
 
         if val_results["NDCG@10"] > best_val_ndcg:
             best_val_ndcg, best_epoch, patience_counter = val_results["NDCG@10"], epoch, 0
