@@ -66,14 +66,18 @@ class KuaiRandSequences:
         return (ms // 86_400_000).astype(np.int64)
 
     def gather(self, event_idx):
-        """Left-padded histories [B, max_len] + targets [B] for event indices."""
-        B, L = len(event_idx), self.max_len
-        x = np.zeros((B, L), dtype=np.int32)
-        for r, e in enumerate(event_idx):
-            lo = max(self.event_start[e], e - L)
-            h = self.video_ids[lo:e]
-            x[r, L - len(h):] = h
-        return x, self.video_ids[event_idx].astype(np.int32)
+        """Left-padded histories [B, max_len] + targets [B] for event indices.
+
+        Vectorized: the window for target e is events [e-L, e) clipped at the
+        user's sequence start — contiguous, so invalid slots are naturally the
+        left-pad positions.
+        """
+        e = np.asarray(event_idx)
+        L = self.max_len
+        cols = e[:, None] + np.arange(-L, 0)[None, :]
+        valid = cols >= self.event_start[e][:, None]
+        x = np.where(valid, self.video_ids[np.clip(cols, 0, None)], 0).astype(np.int32)
+        return x, self.video_ids[e].astype(np.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +270,7 @@ def main():
     if args.smoke:
         args.targets_per_epoch, args.epochs = 200 * args.batch_size, 1
         val_x, val_y = val_x[:2048], val_y[:2048]
+        test_x, test_y = test_x[:2048], test_y[:2048]
 
     drop_rng = jax.random.PRNGKey(args.seed + 1)
     best_val_ndcg, best_epoch, patience_counter, global_step = -1.0, 0, 0, 0
