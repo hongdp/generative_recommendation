@@ -252,32 +252,43 @@ def main():
         out["MRR"] = mrrs / n
         return out
 
-    def layer_leak_curve(params, xs, cap=1024):
-        """Per-layer cos(h_l[readout_pos], e_in(last item)), centered — the
-        production diagnostic (0.4 -> 0.08 across 5 layers on the prod model)."""
-        x = jnp.array(xs[:cap])
+    # Filtered capture: block outputs only — a bare capture_intermediates=True
+    # also stores every Dense/LayerNorm output ([B,N,2048] tensors) and OOMs.
+    blocks_only = lambda mdl, _method: (mdl.name or "").startswith("hstu_block")
+
+    @jax.jit
+    def _readout_states(params, x):
+        """Per-layer hidden state AT the readout position only: [num_blocks, B, d]."""
         mask = make_mask(x, anchor, args.max_len)
-        # Filtered capture: block outputs only — a bare capture_intermediates=True
-        # also stores every Dense/LayerNorm output ([B,129,2048] tensors) and OOMs.
-        blocks_only = lambda mdl, _method: (mdl.name or "").startswith("hstu_block")
-        (h, _), state = model.apply(
+        _, state = model.apply(
             {"params": params}, to_tokens(x), mask, rel_idx, deterministic=True,
             capture_intermediates=blocks_only, mutable=["intermediates"],
         )
-        emb = params["item_embedding"]["embedding"]
-        e_last = emb[np.array(xs[:cap])[:, -1]]
+        inter = state["intermediates"]
+        return jnp.stack([inter[f"hstu_block_{i}"]["__call__"][0][:, ro_pos]
+                          for i in range(args.num_blocks)])
+
+    def layer_leak_curve(params, xs, cap=1024, chunk=128):
+        """Per-layer cos(h_l[readout_pos], e_in(last item)), centered — the
+        production diagnostic (0.4 -> 0.08 across 5 layers on the prod model).
+
+        Chunked: the [B, heads, N, N] attention tensors stay per-chunk and only
+        the [B, d] readout states accumulate. A single 1024-row forward OOMs on
+        16GB for the begin arm (N=129 pads past the 128 tile boundary).
+        """
+        xs = xs[:cap]
+        parts = [np.asarray(_readout_states(params, jnp.array(xs[i:i + chunk])))
+                 for i in range(0, len(xs), chunk)]
+        h_all = np.concatenate(parts, axis=1)                     # [L, B, d]
+        emb = np.asarray(params["item_embedding"]["embedding"])
+        e_last = emb[xs[:, -1]]                                   # [B, d]
 
         def centered_cos(a, b):
             a, b = a - a.mean(0, keepdims=True), b - b.mean(0, keepdims=True)
-            return float(jnp.mean(jnp.sum(a * b, -1) /
-                                  (jnp.linalg.norm(a, axis=-1) * jnp.linalg.norm(b, axis=-1) + 1e-8)))
+            return float(np.mean(np.sum(a * b, -1) /
+                                 (np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1) + 1e-8)))
 
-        inter = state["intermediates"]
-        curve = []
-        for i in range(args.num_blocks):
-            h_l = inter[f"hstu_block_{i}"]["__call__"][0]
-            curve.append(round(centered_cos(h_l[:, ro_pos], e_last), 4))
-        return curve
+        return [round(centered_cos(h_all[i], e_last), 4) for i in range(args.num_blocks)]
 
     # -----------------------------------------------------------------------
     if args.smoke:
