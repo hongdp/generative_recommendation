@@ -311,3 +311,33 @@ Design doc §13.12-13.13. Rows: `begin_timelate*`, `begin_timebothz`, `GenRet E2
 | 2026-07-12 | Readout A/B arm=begin_timez (HSTU 4x256, sampled-softmax M=1024, untied) on STEAM | Local (GeForce RTX 4080) | 0.20686 | 0.17176 | 0.25279 | 0.18652 | 0.31294 | 0.20165 | 0.17643 | Best val NDCG@10=0.21420 (epoch 16); leak self/rand=0.471/-0.000, readout leak=0.043, table align=0.006 |
 | 2026-07-12 | Readout A/B arm=begin_timez (HSTU 4x256, sampled-softmax M=1024, untied) on STEAM | Local (GeForce RTX 4080) | 0.20875 | 0.17378 | 0.25480 | 0.18859 | 0.31548 | 0.20384 | 0.17862 | Best val NDCG@10=0.21535 (epoch 13); leak self/rand=0.477/0.001, readout leak=0.007, table align=0.005 |
 | 2026-07-12 | Readout A/B arm=begin_timez (HSTU 4x256, sampled-softmax M=1024, untied) on STEAM | Local (GeForce RTX 4080) | 0.20836 | 0.17268 | 0.25429 | 0.18746 | 0.31514 | 0.20278 | 0.17733 | Best val NDCG@10=0.21506 (epoch 15); leak self/rand=0.473/0.001, readout leak=0.044, table align=0.007 |
+
+## KuaiRand-27K production-regime readout A/B (2026-08-01/04)
+
+First run outside the academic regime: KuaiRand-27K short-video watch stream, production vocab policy
+(top-100K by last-train-day watch count), single-target GTS supervision (one readout per forward — the
+production setup), 5x512 HSTU (119M params), 18.5M train targets, 500K test targets, full-vocab ranking.
+Experiment archive: `experiments/kuairand_readout_ab_20260801/`.
+
+| Arm | best val NDCG@10 | test NDCG@10 | test HR@1 | test HR@10 | test HR@20 | final-layer leak |
+|:--|--:|--:|--:|--:|--:|--:|
+| A: item readout (production baseline) | 0.007661 (ep 22) | **0.004411** | 0.001962 | 0.007942 | 0.012976 | 0.212 |
+| B: dedicated `<begin>` readout | 0.007303 (ep 17) | 0.003297 | 0.000882 | 0.006868 | 0.012352 | 0.001 |
+| B vs A | −4.7% | **−25.3%** | **−55.0%** (14.3σ) | −13.5% | −4.8% | — |
+
+1. **The dedicated readout token REVERSES sign in the production regime: −25% NDCG@10, −55% HR@1**
+   (vs +3-8% on Beauty/Steam multi-position 4x256). The damage gradient by rank (−55% @1 → −4.8% @20)
+   marks it as a precision loss, not a capacity loss.
+2. **Mechanism = the identity shortcut.** The item arm's readout lives in the last watched video's own
+   residual stream and carries cos 0.21 with that video's input embedding — a same-author/topic/music
+   prior that is first-class for next-watch top-1. The `<begin>` token is structurally incapable of it
+   (leak 0.001 all run) and must route it through an attention hop.
+3. **Training ACCUMULATES self-content, it does not shed it**: item-arm final-layer leak rose monotonically
+   0.028 → 0.247 over 26 epochs. The leak profile [0.64, 0.69, 0.69, 0.67, 0.21] is deliberate retention
+   through the stack with a controlled release at the head — not an incomplete role handoff. This overturns
+   the earlier "dual-role interference" framing for this regime: here the dual role is a benefit.
+4. **Explains the production null result.** A production model that reads out the previous watch's output
+   already has the identity prior for free; a dedicated readout token would sever it. Nothing to fix.
+5. Caveats: single seed per arm; checkpoints selected on a noisy 50K val (val gap −4.7% is inside noise,
+   the 500K test gap is not). Next: the reinject arm (`h_b + alpha * e_in(anchor)`) should recover most of
+   the gap — that is the direct test of the identity-shortcut mechanism.
