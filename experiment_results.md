@@ -325,9 +325,19 @@ Experiment archive: `experiments/kuairand_readout_ab_20260801/`.
 | B: dedicated `<begin>` readout | 0.007303 (ep 17) | 0.003297 | 0.000882 | 0.006868 | 0.012352 | 0.001 |
 | B vs A | −4.7% | **−25.3%** | **−55.0%** (14.3σ) | −13.5% | −4.8% | — |
 
-1. **The dedicated readout token REVERSES sign in the production regime: −25% NDCG@10, −55% HR@1**
-   (vs +3-8% on Beauty/Steam multi-position 4x256). The damage gradient by rank (−55% @1 → −4.8% @20)
-   marks it as a precision loss, not a capacity loss.
+**Deep-K follow-up: the sign flips at K≈50** (same checkpoints, same 500K test set, `eval_kuairand_deepk.py`):
+
+| K | 1 | 5 | 10 | 20 | 50 | 100 | 200 | 500 | 1000 |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| begin vs item HR@K | −55.0% | −23.9% | −13.5% | −4.8% | **+4.3%** | +7.6% | +9.2% | +11.0% | **+11.7%** |
+| σ | −14.3 | −9.0 | −6.2 | −2.8 | +3.3 | +7.5 | +11.3 | +18.1 | +23.5 |
+
+NDCG@K crosses at K≈200. Median rank: item 9135 vs begin **7217** (−21%).
+
+1. **It is a precision/recall trade, not a loss.** The readout token loses the head of the list and wins
+   everything past ~50 candidates. Judging it on NDCG@10 alone reads one point off this curve. The +3-8%
+   gains seen on Beauty/Steam multi-position 4x256 and the −25% NDCG@10 here are the same curve sampled
+   at different places.
 2. **Mechanism = the identity shortcut.** The item arm's readout lives in the last watched video's own
    residual stream and carries cos 0.21 with that video's input embedding — a same-author/topic/music
    prior that is first-class for next-watch top-1. The `<begin>` token is structurally incapable of it
@@ -336,8 +346,10 @@ Experiment archive: `experiments/kuairand_readout_ab_20260801/`.
    0.028 → 0.247 over 26 epochs. The leak profile [0.64, 0.69, 0.69, 0.67, 0.21] is deliberate retention
    through the stack with a controlled release at the head — not an incomplete role handoff. This overturns
    the earlier "dual-role interference" framing for this regime: here the dual role is a benefit.
-4. **Explains the production null result.** A production model that reads out the previous watch's output
-   already has the identity prior for free; a dedicated readout token would sever it. Nothing to fix.
+4. **Production implication depends on the model's role.** A top-1-scored end-to-end model keeps the item
+   readout (it already has the identity prior for free). A retrieval stage feeding a ranker is scored at
+   recall@100-500, where the readout token is worth +7.6% to +11.0% — a null result there may just mean the
+   offline metric was a small-K one that hides the win.
 5. Caveats: single seed per arm; checkpoints selected on a noisy 50K val (val gap −4.7% is inside noise,
    the 500K test gap is not). Next: the reinject arm (`h_b + alpha * e_in(anchor)`) should recover most of
    the gap — that is the direct test of the identity-shortcut mechanism.
