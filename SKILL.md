@@ -50,6 +50,8 @@ When training large models (e.g., 1B parameters) on consumer hardware with limit
 
 ## 7. Architectural Learnings & Experience Log
 
+> GCP-generic practices (Orbax/GCS FUSE, FUSE fork deadlocks, JAX sharding/init guards, TPU/GPU provisioning and lifecycle) are consolidated in the shared **`gcp-trainer`** skill (`~/Workspace/SKILLS/gcp-trainer`, loaded via `~/.claude/skills`). Consult it first for any cloud run. The dated entries below are kept as the original record; new generalizable lessons go to the shared skill, project-specific facts stay here.
+
 ### [2026-06-04] Orbax Checkpointing on GCS FUSE
 - **Orbax "Too many open files" Error**: When saving checkpoints to a Cloud Storage Bucket via GCS FUSE (`/gcs/...`), the default `ocp.CheckpointManager` spawns asynchronous threads that open thousands of tensor files concurrently. This hits the Linux `ulimit` for open file descriptors (`OSError: [Errno 24]`). **Always** disable async checkpointing using `ocp.CheckpointManagerOptions(enable_async_checkpointing=False)` when saving directly to GCS FUSE mounts. Additionally, for large models (e.g. 1B+ parameters, which split into 1000+ array files), you must dynamically increase the file descriptor limits (`RLIMIT_NOFILE`) inside python at the very start of the script:
   ```python
@@ -88,7 +90,7 @@ Adhere to the following guidelines when tracking project items in `tasks.md`:
 
 ## 10. Cloud TPU Lifecycle Management
 
-When operating Cloud TPU VMs (e.g., `v5litepod-8`, `v4-8`, `v5p-8`) on Google Cloud, it is critical to distinguish between stopping and deleting the instances to preserve valuable datasets and environments while controlling costs.
+General lifecycle, provisioning, and cost rules live in the shared **`gcp-trainer`** skill (§6 stop-vs-delete decision rule, §2 zone/accelerator fallback). Project-specific instantiation:
 
-- **NEVER DELETE** an active experimental TPU unless the project is permanently concluded. Deleting a TPU (`gcloud compute tpus tpu-vm delete`) destroys the persistent disk, wiping out the JAX environment, code, and large datasets (e.g., the 1.2GB Steam reviews).
-- **ALWAYS STOP** the TPU when training is paused (e.g., overnight or between experiments). Stopping the TPU (`gcloud compute tpus tpu-vm stop`) releases the expensive accelerators back to the pool and stops compute billing, but preserves the persistent disk and all data for immediate resumption.
+- **This project's TPU state lives on the persistent disk** (JAX env, code, the 1.2GB Steam reviews dataset), so the stop-vs-delete decision resolves to: **STOP between experiments, never delete** an active experimental TPU (`gcloud compute tpus tpu-vm stop` releases the accelerators and stops compute billing while preserving the disk). Datasets are also archived in GCS (`cloud_config.local.yaml` has the bucket URI and re-download commands), so a deleted TPU is recoverable — but re-provisioning risks a capacity stockout (see the fallback list in `scripts/run_on_tpu.sh`).
+- `scripts/run_on_tpu.sh` = ephemeral flow (EXIT-trap delete); `scripts/run_existing_tpu.sh` = long-lived flow (no trap). Pick deliberately.
