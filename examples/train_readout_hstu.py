@@ -175,7 +175,7 @@ def main():
     parser.add_argument("--late_w2_std", action="store_true",
                         help="Ablation cell: residual late fusion but with standard-init W2 (isolates "
                              "the init effect from the residual effect in the 3-cell factorization).")
-    parser.add_argument("--time_mode", type=str, default="input", choices=["input", "late"],
+    parser.add_argument("--time_mode", type=str, default="input", choices=["input", "late", "both"],
                         help="input: features condition the <begin> token before the transformer "
                              "(time can change WHAT gets aggregated). late: features are fused into "
                              "the finished readout vector via a residual MLP (zero-init last layer) — "
@@ -199,10 +199,12 @@ def main():
     if args.time_features and args.readout != "begin":
         raise ValueError("--time_features conditions the <begin> token; use --readout begin")
     rj = "" if args.reinject == "none" else f"_reinj{args.reinject}"
-    time_late = args.time_features and args.time_mode == "late"
+    time_late = args.time_features and args.time_mode in ("late", "both")
+    time_input = args.time_features and args.time_mode in ("input", "both")
     if time_late and args.reinject != "none":
-        raise ValueError("--time_mode late and --reinject are not combined in this experiment")
-    rj += ("_timelatenr" if time_late and args.late_no_residual
+        raise ValueError("--time_mode late/both and --reinject are not combined in this experiment")
+    rj += ("_timeboth" if args.time_mode == "both"
+           else "_timelatenr" if time_late and args.late_no_residual
            else "_timelatestd" if time_late and args.late_w2_std
            else "_timelate" if time_late else "_time") if args.time_features else ""
     rj += "z" if args.feat_zero_init else ""
@@ -284,7 +286,7 @@ def main():
     dummy = jnp.zeros((1, n_total), dtype=jnp.int32)
     dummy_mask = jnp.ones((1, n_total, n_total), dtype=bool)
     init_kw = {}
-    if args.time_features and not time_late:
+    if time_input:
         init_kw = {"feats": jnp.zeros((1, n_total, 6)), "feat_mask": feat_mask_full}
     params = model.init(key, dummy, dummy_mask, rel_idx, **init_kw)["params"]
     # Wrapped param trees: re-injection adds a gate alpha (masked out of weight
@@ -332,7 +334,7 @@ def main():
             mp = model_tree(p)
             tokens = to_tokens(x)
             mask = make_mask(x, anchor, max_len)
-            fkw = {} if (feats is None or time_late) else {"feats": feats, "feat_mask": feat_mask_full}
+            fkw = {} if (feats is None or not time_input) else {"feats": feats, "feat_mask": feat_mask_full}
             h, out_table = model.apply(
                 {"params": mp}, tokens, mask, rel_idx,
                 rngs={"dropout": dropout_key}, deterministic=False, **fkw,
@@ -365,7 +367,7 @@ def main():
         mp = model_tree(params)
         tokens = to_tokens(x)
         mask = make_mask(x, anchor, max_len)
-        fkw = {} if (feats is None or time_late) else {"feats": feats, "feat_mask": feat_mask_full}
+        fkw = {} if (feats is None or not time_input) else {"feats": feats, "feat_mask": feat_mask_full}
         h, out_table = model.apply({"params": mp}, tokens, mask, rel_idx, deterministic=True, **fkw)
         # item arm: stream of the most recent item; begin arm: b_{L-1}
         h_q = h[:, max_len - 1] if args.readout == "item" else h[:, -1]
@@ -468,7 +470,7 @@ def main():
     tokens = to_tokens(sample)
     mask = make_mask(sample, anchor, max_len)
     diag_kw = {}
-    if args.time_features and not time_late:
+    if time_input:
         diag_kw = {"feats": jnp.array(expand_feats(val_feats[: sample.shape[0]])), "feat_mask": feat_mask_full}
     h, out_table = model.apply({"params": best_model_params}, tokens, mask, rel_idx, deterministic=True, **diag_kw)
     emb_table = best_model_params["item_embedding"]["embedding"]

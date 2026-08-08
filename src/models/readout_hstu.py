@@ -147,3 +147,56 @@ class ReadoutHSTUModel(nn.Module):
                 (self.num_items + 1, self.embedding_dim),
             )
         return x, out_table
+
+
+class GenReadoutHSTUModel(nn.Module):
+    """Generative-retrieval head on the shared readout backbone (E2 arm).
+
+    Same MaskedHSTU encoder as ReadoutHSTUModel; branches are 4-token SID
+    decoders ([<begin>, c1, c2, c3] teacher-forced, intra-branch causal via the
+    caller's mask). Vocabulary: 0 pad, 1..num_items items, num_items+1 <begin>,
+    then num_levels*num_codes code tokens. Returns hidden states plus per-level
+    code heads [num_levels, d, num_codes]; scoring/beam search live in the
+    training script so the fair-comparison delta vs the dense arm is confined
+    to the output parameterization.
+    """
+
+    num_items: int
+    num_levels: int = 4
+    num_codes: int = 256
+    embedding_dim: int = 256
+    num_blocks: int = 4
+    num_heads: int = 4
+    attention_dim: int = 128
+    linear_dim: int = 512
+    attn_dropout_rate: float = 0.1
+    linear_dropout_rate: float = 0.1
+    num_rel_buckets: int = 64
+
+    @nn.compact
+    def __call__(
+        self,
+        tokens: jnp.ndarray,     # [batch, N]
+        mask: jnp.ndarray,       # [batch, N, N] bool
+        rel_idx: jnp.ndarray,    # [N, N] int32
+        deterministic: bool = True,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        vocab = self.num_items + 2 + self.num_levels * self.num_codes
+        x = nn.Embed(num_embeddings=vocab, features=self.embedding_dim,
+                     name="item_embedding")(tokens)
+        for i in range(self.num_blocks):
+            x = MaskedHSTUBlock(
+                attention_dim=self.attention_dim,
+                linear_dim=self.linear_dim,
+                num_heads=self.num_heads,
+                attn_dropout_rate=self.attn_dropout_rate,
+                linear_dropout_rate=self.linear_dropout_rate,
+                num_rel_buckets=self.num_rel_buckets,
+                name=f"hstu_block_{i}",
+            )(x, mask, rel_idx, deterministic=deterministic)
+        code_heads = self.param(
+            "code_heads",
+            nn.initializers.normal(stddev=0.02),
+            (self.num_levels, self.embedding_dim, self.num_codes),
+        )
+        return x, code_heads

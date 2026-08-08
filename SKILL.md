@@ -17,7 +17,7 @@ This skill defines the core principles to follow when developing this repository
 - **Docstrings**: Every new module, class, and function must have a clear docstring explaining its purpose, arguments, and return values.
 - **Code Comments**: Use comments to explain *why* a particular approach was taken, especially for complex mathematical operations or JAX transformations.
 - **Commit Messages**: Write clear, descriptive commit messages. Explain the problem being solved and how the commit addresses it.
-- **Experiment Results Log**: Document every cloud training, local test, or evaluation run in `experiment_results.md` at the project root to preserve reproducibility and track performance metrics.
+- **Experiment Results Log**: Experiment tracking follows the general `ml-experiment-tracking` skill (purpose/method/success criteria before the run, progress during, results/conclusion after). This repo's project-specific conventions are in §8 below.
 
 ## 3. Continuous Learning and Skill Updates
 - **Update Skills**: When you discover a new pattern, a recurring issue, or a best practice specific to JAX or this project's architecture, update this `SKILL.md` or create a new, specialized skill document.
@@ -70,19 +70,15 @@ When training large models (e.g., 1B parameters) on consumer hardware with limit
 
 ### [2026-06-06] Generative Recommender (TIGER) & Model Evaluation Protocols
 - **Discriminative vs. Generative Training Loops**: Discriminative/Index-based recommendation models (e.g., HSTU) compute cross-entropy loss over the total catalog items (`num_items + 1`) only on the final sequence position. Generative recommendation models (e.g., TIGER) tokenize sequences into flattened, shifted Semantic IDs (length `3 * L + 1` for $C=3$) and train using teacher-forcing cross-entropy loss over a vocabulary of size `3 * K + 2` at all positions. Keep their runner scripts separate to avoid complex branch logic.
-- **TensorBoard Logging Horizontal Axis**: For TensorBoard logging during training, default PyTorch `SummaryWriter` plots horizontal curves against "Step". To enable meaningful step-level tracking, log metrics against `global_step = (epoch - 1) * num_batches + batch_idx` for detailed batch-level gradient steps, rather than just epoch indices.
-- **Evaluation Frequency**: To capture tight convergence windows and prevent over-fitting, run validation evaluation on every epoch (`if True:` check) rather than skipping epochs.
 - **Semantic Quantization Baselines**: For generating item Semantic IDs, sequential RQ-KMeans on item text embeddings (run sequentially over residual levels) serves as a fast, highly active codebook alternative (perfect codeword utilization) compared to standard neural VAE models. Ensure that padding tokens at index 0 are excluded from clustering and map directly to `[0, 0, 0]`.
 
-## 8. Maintaining the Experiment Log
-To ensure systematic progress, adhere to the following protocol when executing training or evaluation trials:
-- **Immediate Logging**: Add an entry to `experiment_results.md` immediately after submitting a custom job, recording the date, environment, configuration, and the direct Vertex AI/Cloud console link.
-- **Goal Definition**: Clearly state the objective of the trial (e.g., "Observe MFU on A100", "WikiText PPL benchmark validation").
-- **Observation Metrics**: Upon completion, retrieve and fill in the key metrics:
-  - **Train/Eval Loss**: Cross-entropy losses indicating convergence.
-  - **Perplexity (PPL)**: The standard NLP test set PPL (e.g., on WikiText-103).
-  - **Throughput & MFU**: Compute tokens/sec/device and MFU percentage to monitor hardware efficiency.
-- **Problem & Fix Recording**: Document any runtime errors (e.g., GCS FUSE descriptor leaks, JAX compatibility crashes) alongside their specific remediation steps.
+## 8. Experiment Tracking — Project-Specific Conventions
+The recording discipline (hypothesis/method/success criteria BEFORE the run, progress DURING, results/conclusion/artifacts AFTER) comes from the general **`ml-experiment-tracking`** skill. This project's specializations:
+- **Ledger location**: this repo predates the `experiments/` directory layout; the project ledger is `experiment_results.md` at the repo root (dated campaign sections + summary tables). It serves as the INDEX equivalent — every run's conclusion lands there.
+- **Semantic-ID ↔ checkpoint binding**: TIGER checkpoints are only meaningful against the exact Semantic-ID file they were trained on. Always generate IDs with a fixed `--seed`, and rely on the `semantic_ids_hash` sidecar + reload guards (`src/models/tiger_tokenization.py`) — an inexplicable Valid@Beam ≈ 0 means ID/checkpoint mismatch until proven otherwise.
+- **TIGER health metrics**: alongside HR@k/NDCG@k, always log Valid@Beam, Semantic-ID collision rate, and per-level codebook utilization — they diagnose whether a regression is model-side or ID-side.
+- **Beauty val→test gap**: expect a ~30% val→test drop on Amazon Beauty (test targets skew rarer/newer — see the 2026-07-04 diagnostic in `experiment_results.md`). Select checkpoints on val NDCG@10 only, and compare arms on the same split.
+- **Cloud runs**: jobs run on Vertex AI / Cloud TPU; per the general skill, the console link goes into the ledger entry at submission time.
 
 ## 9. Task List Management Protocols
 Adhere to the following guidelines when tracking project items in `tasks.md`:
@@ -96,9 +92,3 @@ When operating Cloud TPU VMs (e.g., `v5litepod-8`, `v4-8`, `v5p-8`) on Google Cl
 
 - **NEVER DELETE** an active experimental TPU unless the project is permanently concluded. Deleting a TPU (`gcloud compute tpus tpu-vm delete`) destroys the persistent disk, wiping out the JAX environment, code, and large datasets (e.g., the 1.2GB Steam reviews).
 - **ALWAYS STOP** the TPU when training is paused (e.g., overnight or between experiments). Stopping the TPU (`gcloud compute tpus tpu-vm stop`) releases the expensive accelerators back to the pool and stops compute billing, but preserves the persistent disk and all data for immediate resumption.
-
-## 11. Data Safety and File Modification Protocol
-**CRITICAL WARNING FOR AI AGENTS:** 
-Never perform in-place byte/text replacement using Python one-liners like `open(f, 'wb').write(open(f, 'rb').read()...)` without first creating a backup of the target directory! The python evaluation order will truncate the file to 0 bytes before reading it, causing catastrophic and irreversible data loss.
-- **Rule**: ALWAYS copy the target files/directories to a `_backup` folder before attempting any batch modification (especially for non-versioned data like TensorBoard logs, model checkpoints, or raw datasets).
-- **Rule**: Verify the modification script on a single dummy file first.
