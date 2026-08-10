@@ -353,3 +353,26 @@ NDCG@K crosses at K≈200. Median rank: item 9135 vs begin **7217** (−21%).
 5. Caveats: single seed per arm; checkpoints selected on a noisy 50K val (val gap −4.7% is inside noise,
    the 500K test gap is not). Next: the reinject arm (`h_b + alpha * e_in(anchor)`) should recover most of
    the gap — that is the direct test of the identity-shortcut mechanism.
+
+## Flow-matching generative retrieval on KuaiRand (2026-08-07/09) — negative, with a design law
+
+Two-stage design (frozen item-arm 5x512 + 100Kx512 sampled-softmax table as stage-1; conditional OT-CFM
+FlowHead h_user + M noise samples -> points -> metric-NN retrieval as stage-2). Archive:
+`experiments/kuairand_flow_retrieval_20260807/`. Same 500K test draw as the deep-K eval.
+
+| System | recall@100 | recall@500 | recall@1000 | median rank |
+|:--|--:|--:|--:|--:|
+| dense baseline (one dot query) | 0.0399 | 0.1144 | 0.1720 | 9,135 |
+| flow M=1 / M=16 (2-step Euler) | 0.0011 / 0.0009 | 0.0057 / 0.0045 | 0.0111 / 0.0088 | 53K / 63K |
+
+1. Flow retrieval ≈ random floor. NOT mode collapse (pairwise cos 0.15 — samples diverse): the failure is
+   uninformed conditioning — corr(gen rank, dense rank) = -0.10 from the same h.
+2. Oracle probes killed the architecture, not just the run: L2-rank of the target around dense-top1's OWN
+   embedding = 35K (random); **cos(last watch, target) 0.368 vs cos(last watch, random) 0.381 — the frozen
+   sampled-softmax table has zero item-item metric locality**, so ANY point-generator + metric-NN scheme is
+   bounded at chance on it. Anchored-flow arm 2 was implemented but its decision gate (W-anchor baseline)
+   correctly failed; not launched.
+3. **Design law**: before building a generator into a frozen embedding space, measure cos(consecutive-event
+   pairs) vs random pairs; if equal, stop — fix stage-1 (item-item locality objective) or generate in SID
+   space where locality is built in by quantization. Explains why industrial generative retrieval (TIGER,
+   OneRec) quantizes rather than generating raw two-tower vectors.

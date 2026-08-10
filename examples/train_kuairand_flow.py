@@ -57,6 +57,11 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--exp_dir", type=str, required=True)
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--anchor", action="store_true",
+                    help="Arm 2: fit closed-form ridge W: h -> x1 and flow from x0 = Wh + sigma*eps "
+                         "(per-dim residual sd) instead of global N(0,I). The generator then only "
+                         "learns the local multimodal spread; W carries the global geometry.")
+    ap.add_argument("--anchor_fit_n", type=int, default=200_000)
     args = ap.parse_args()
 
     os.makedirs(args.exp_dir, exist_ok=True)
@@ -107,6 +112,40 @@ def main():
                               rel_idx, deterministic=True)
         return h[:, max_len - 1]                              # [B, dim]
 
+    # ---- optional anchor map (arm 2) ---------------------------------------
+    anchor_W = anchor_s = None
+    if args.anchor:
+        print(f"Fitting anchor map W on {args.anchor_fit_n:,} train targets...")
+        fit_idx = rng.choice(data.train_pool, args.anchor_fit_n, replace=False)
+        Hs, Xs = [], []
+        for i in range(0, len(fit_idx), 1024):
+            x, y = data.gather(fit_idx[i:i + 1024])
+            Hs.append(np.asarray(readout(jnp.array(x))))
+            Xs.append(np.asarray(table_n)[y - 1])
+        H = np.concatenate(Hs); X = np.concatenate(Xs)
+        H1 = np.concatenate([H, np.ones((len(H), 1), dtype=H.dtype)], axis=1)  # bias column
+        A = H1.T @ H1 + 1e-3 * len(H1) * np.eye(H1.shape[1], dtype=H1.dtype)
+        W = np.linalg.solve(A, H1.T @ X)
+        resid = X - H1 @ W
+        anchor_W = jnp.asarray(W)                              # [dim+1, dim]
+        anchor_s = jnp.asarray(resid.std(axis=0) + 1e-6)       # [dim]
+        print(f"anchor fit: residual per-dim sd mean {float(anchor_s.mean()):.3f} "
+              f"(unconditional would be ~1.0)")
+
+    def anchor_point(h):
+        ones = jnp.ones((h.shape[0], 1), dtype=h.dtype)
+        return jnp.concatenate([h, ones], axis=1) @ anchor_W
+
+    def draw_x0(h, key, shape):
+        """Flow source: N(0,I) (arm 1) or anchor + residual-scaled noise (arm 2)."""
+        eps = jax.random.normal(key, shape)
+        if not args.anchor:
+            return eps
+        a = anchor_point(h)
+        if len(shape) == 3:                                    # [B, M, dim]
+            a = a[:, None, :]
+        return a + anchor_s * eps
+
     # ---- trainable flow head ------------------------------------------------
     flow = FlowHead(hidden_dim=args.hidden, output_dim=dim)
     key = jax.random.PRNGKey(args.seed)
@@ -121,7 +160,7 @@ def main():
     @jax.jit
     def train_step(fparams, opt_state, h, x1n, key):
         k0, kt = jax.random.split(key)
-        x0 = jax.random.normal(k0, x1n.shape)
+        x0 = draw_x0(h, k0, x1n.shape)
         t = jax.random.uniform(kt, (x1n.shape[0],))
         xt = (1.0 - t[:, None]) * x0 + t[:, None] * x1n
 
@@ -139,7 +178,7 @@ def main():
     def generate(fparams, h, key, num_samples, num_steps):
         """Euler-integrate num_samples noise seeds per user: [B, M, dim]."""
         B = h.shape[0]
-        z = jax.random.normal(key, (B, num_samples, dim))
+        z = draw_x0(h, key, (B, num_samples, dim))
         hM = jnp.repeat(h[:, None, :], num_samples, axis=1).reshape(B * num_samples, dim)
         z = z.reshape(B * num_samples, dim)
         dt = 1.0 / num_steps
@@ -251,6 +290,17 @@ def main():
     # ---- final test: headline cells + M x steps grid ------------------------
     print("\nTest eval (headline cells on full draw)...")
     final = {"best_epoch": best_epoch, "best_val_recall500": best_val}
+    if args.anchor:
+        # W-only baseline: rank of the bare anchor point, no flow, no noise.
+        ranks = []
+        for i in range(0, len(test_idx), 64):
+            x, y = data.gather(test_idx[i:i + 64])
+            a = anchor_point(readout(jnp.array(x)))
+            ranks.append(np.array(merged_rank_of_target(a[:, None, :], jnp.array(y))))
+        ranks = np.concatenate(ranks)
+        final["test_anchor_only"] = {f"recall@{k}": float((ranks <= k).mean()) for k in KS}
+        final["test_anchor_only"]["median_rank"] = float(np.median(ranks))
+        print(f"  anchor-only (W, no flow): {final['test_anchor_only']}")
     for M, S in [(1, 2), (16, 2)]:
         key, k = jax.random.split(key)
         res, ranks = evaluate(fparams, test_idx, M, S, k, diags=True)
