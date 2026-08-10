@@ -119,6 +119,13 @@ def main():
     parser.add_argument("--attention_dim", type=int, default=256)
     parser.add_argument("--linear_dim", type=int, default=2048, help="4x embedding_dim, matching production FFN ratio.")
     parser.add_argument("--dropout_rate", type=float, default=0.1)
+    parser.add_argument("--normalize", action="store_true",
+                        help="Cosine retrieval scoring (s = 20*cos(h, e)) instead of raw dot, train and eval.")
+    parser.add_argument("--cowatch_weight", type=float, default=0.0,
+                        help="Weight of the co-watch item-item InfoNCE auxiliary loss on the out_table "
+                             "(aligns e(last watch) -> e(target) vs in-batch negatives). Gives the table "
+                             "metric locality — the property the flow-retrieval postmortem showed is absent.")
+    parser.add_argument("--cowatch_temp", type=float, default=0.07)
     parser.add_argument("--num_negatives", type=int, default=1024)
     parser.add_argument("--learning_rate", type=float, default=3e-4,
                         help="Peak LR. 1e-3 (the 4x256 academic default) diverges to NaN by step ~2500 "
@@ -218,11 +225,28 @@ def main():
                 rngs={"dropout": dropout_key}, deterministic=False,
             )
             h_ro = h[:, ro_pos]                                    # [B, d]
-            pos_logit = jnp.sum(h_ro * out_table[labels], axis=-1)  # [B]
-            neg_logits = h_ro @ out_table[negs].T                   # [B, M]
+            if args.normalize:
+                h_ro = 20.0 * h_ro / (jnp.linalg.norm(h_ro, axis=-1, keepdims=True) + 1e-8)
+                tbl = out_table / (jnp.linalg.norm(out_table, axis=-1, keepdims=True) + 1e-8)
+            else:
+                tbl = out_table
+            pos_logit = jnp.sum(h_ro * tbl[labels], axis=-1)        # [B]
+            neg_logits = h_ro @ tbl[negs].T                         # [B, M]
             neg_logits = jnp.where(negs[None, :] == labels[:, None], -1e9, neg_logits)
             logits = jnp.concatenate([pos_logit[:, None], neg_logits], axis=-1)
-            return -jax.nn.log_softmax(logits, axis=-1)[:, 0].mean()
+            loss = -jax.nn.log_softmax(logits, axis=-1)[:, 0].mean()
+            if args.cowatch_weight > 0.0:
+                # Item-item locality: align e(last watch) with e(target) against
+                # in-batch negatives, in cosine space. Normalize only the rows
+                # used (normalizing the full 100K table per step costs ~25% throughput).
+                a = out_table[x[:, -1]]
+                b = out_table[labels]
+                a = a / (jnp.linalg.norm(a, axis=-1, keepdims=True) + 1e-8)
+                b = b / (jnp.linalg.norm(b, axis=-1, keepdims=True) + 1e-8)
+                sim = (a @ b.T) / args.cowatch_temp                 # [B, B]
+                cw = -jax.nn.log_softmax(sim, axis=-1).diagonal().mean()
+                loss = loss + args.cowatch_weight * cw
+            return loss
 
         loss, grads = jax.value_and_grad(loss_fn)(params)
         updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -232,7 +256,19 @@ def main():
     def predict_scores(params, x):
         mask = make_mask(x, anchor, args.max_len)
         h, out_table = model.apply({"params": params}, to_tokens(x), mask, rel_idx, deterministic=True)
-        return h[:, ro_pos] @ out_table.T                           # [B, num_items+1]
+        h_q = h[:, ro_pos]
+        if args.normalize:
+            h_q = h_q / (jnp.linalg.norm(h_q, axis=-1, keepdims=True) + 1e-8)
+            out_table = out_table / (jnp.linalg.norm(out_table, axis=-1, keepdims=True) + 1e-8)
+        return h_q @ out_table.T                                    # [B, num_items+1]
+
+    def adjacency_gap(params, xs, ys, cap=2048):
+        """Locality probe: mean cos(e_last, e_target) - cos(e_last, e_random) on the out_table."""
+        tbl = np.asarray(params["out_embedding"])
+        en = tbl / (np.linalg.norm(tbl, axis=1, keepdims=True) + 1e-8)
+        last, tgt = xs[:cap, -1], ys[:cap]
+        rnd = np.random.RandomState(0).randint(1, tbl.shape[0], size=len(tgt))
+        return float((en[last] * en[tgt]).sum(1).mean() - (en[last] * en[rnd]).sum(1).mean())
 
     def run_eval(params, xs, ys, chunk=256):
         hits, ndcgs, mrrs = {k: 0.0 for k in (1, 5, 10, 20)}, {k: 0.0 for k in (1, 5, 10, 20)}, 0.0
@@ -329,11 +365,15 @@ def main():
 
         val_results = run_eval(params, val_x, val_y)
         leak = layer_leak_curve(params, val_x)
+        adj = adjacency_gap(params, val_x, val_y)
         print(f"Epoch {epoch:02d} | loss {avg_loss:.4f} | {dt:.0f}s ({nb * args.batch_size / dt:.0f} tgt/s) | "
-              f"val NDCG@10 {val_results['NDCG@10']:.5f} HR@10 {val_results['HR@10']:.5f} | leak {leak}")
+              f"val NDCG@10 {val_results['NDCG@10']:.5f} HR@10 {val_results['HR@10']:.5f} | "
+              f"adjΔ {adj:.4f} | leak {leak}")
         log_metrics(epoch=epoch, step=global_step, loss=round(avg_loss, 5),
                     val={k: round(v, 6) for k, v in val_results.items()},
-                    leak_curve=leak, targets_per_sec=round(nb * args.batch_size / dt))
+                    leak_curve=leak, adjacency_gap=round(adj, 5),
+                    targets_per_sec=round(nb * args.batch_size / dt))
+        writer.add_scalar("val/adjacency_gap", adj, global_step)
         for m, s in val_results.items():
             writer.add_scalar(f"val/{m}", s, global_step)
         for li, lv in enumerate(leak):
