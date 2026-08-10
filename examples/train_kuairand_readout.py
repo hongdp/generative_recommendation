@@ -126,6 +126,9 @@ def main():
                              "(aligns e(last watch) -> e(target) vs in-batch negatives). Gives the table "
                              "metric locality — the property the flow-retrieval postmortem showed is absent.")
     parser.add_argument("--cowatch_temp", type=float, default=0.07)
+    parser.add_argument("--cowatch_positions", type=int, default=1,
+                        help="How many recent history positions to pair with the target in the co-watch "
+                             "aux loss (item2vec-style edge densification: P pairs per sample instead of 1).")
     parser.add_argument("--num_negatives", type=int, default=1024)
     parser.add_argument("--learning_rate", type=float, default=3e-4,
                         help="Peak LR. 1e-3 (the 4x256 academic default) diverges to NaN by step ~2500 "
@@ -236,15 +239,26 @@ def main():
             logits = jnp.concatenate([pos_logit[:, None], neg_logits], axis=-1)
             loss = -jax.nn.log_softmax(logits, axis=-1)[:, 0].mean()
             if args.cowatch_weight > 0.0:
-                # Item-item locality: align e(last watch) with e(target) against
-                # in-batch negatives, in cosine space. Normalize only the rows
-                # used (normalizing the full 100K table per step costs ~25% throughput).
-                a = out_table[x[:, -1]]
-                b = out_table[labels]
+                # Item-item locality, item2vec-style: pair each of the last P
+                # history positions with the target, scored against the shared
+                # 1024 uniform negatives (in-batch-only negatives at 127 were
+                # too weak — v3 plateaued at adjacency gap 0.026). Normalize
+                # only the rows used.
+                P = args.cowatch_positions
+                anc = x[:, -P:]                                     # [B, P]
+                w_pair = (anc > 0).astype(jnp.float32)              # pad guard
+                a = out_table[anc]                                  # [B, P, d]
+                b = out_table[labels]                               # [B, d]
+                nn_ = out_table[negs]                               # [M, d]
                 a = a / (jnp.linalg.norm(a, axis=-1, keepdims=True) + 1e-8)
                 b = b / (jnp.linalg.norm(b, axis=-1, keepdims=True) + 1e-8)
-                sim = (a @ b.T) / args.cowatch_temp                 # [B, B]
-                cw = -jax.nn.log_softmax(sim, axis=-1).diagonal().mean()
+                nn_ = nn_ / (jnp.linalg.norm(nn_, axis=-1, keepdims=True) + 1e-8)
+                pos = jnp.sum(a * b[:, None, :], axis=-1) / args.cowatch_temp        # [B, P]
+                neg = jnp.einsum("bpd,md->bpm", a, nn_) / args.cowatch_temp          # [B, P, M]
+                neg = jnp.where((negs[None, None, :] == labels[:, None, None]), -1e9, neg)
+                lg = jnp.concatenate([pos[:, :, None], neg], axis=-1)
+                ce = -jax.nn.log_softmax(lg, axis=-1)[:, :, 0]
+                cw = jnp.sum(ce * w_pair) / jnp.maximum(jnp.sum(w_pair), 1.0)
                 loss = loss + args.cowatch_weight * cw
             return loss
 
