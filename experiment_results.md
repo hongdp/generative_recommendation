@@ -397,3 +397,24 @@ Sequel to the flow postmortem. Archive: `experiments/kuairand_locality_stage1_20
 5. Cloud migration shakeout (A100 flex-start, $2.02/h): DLVM lacks python3-venv; sha256 -c embeds relative
    paths (run from repo root); guest shutdown leaves flex VMs TERMINATED holding their name — delete.
    A100 batch-512 throughput: 11K tgt/s for the flow head (6.5× local 4080).
+
+## Flow vs direct regression on the item2vec space (2026-08-11) — the generative premise refuted at this scale
+
+Two self-deleting A100 flex-start runs (parallel, ~$3 total). Archive: `experiments/kuairand_flow_vs_regress_20260810/`.
+
+| System | recall@500 | recall@1000 | median rank |
+|:--|--:|--:|--:|
+| **MSE regression head (1 fwd, deterministic)** | **0.1099** | **0.1713** | **7,147** |
+| flow M=16 (best generative cell) | 0.0792 | 0.1273 | 9,921 |
+| dense dot baseline | 0.1144 | 0.1720 | 9,135 |
+
+1. **Direct regression beats conditional flow by +39%/+35% (recall@500/1000)** and MATCHES the dense
+   baseline with a 3M-param head over the 20-minute item2vec space (median rank actually better).
+2. The mean-seeking fear (the motivating argument for generative heads) does not materialize under
+   metric-NN retrieval: the query point need not be a valid item, and the conditional mean is by
+   construction near-optimal for expected-distance retrieval. Flow's sampling noise costs more than
+   its diversity recovers (M=16 vs M=1 is +7%; regression's margin is +39%).
+3. Longer flow training changes nothing (40-epoch run converged at the same 0.079).
+4. Verdict for embedding-space generative retrieval at this scale: locality law stands, but once the
+   space is fixed, **conditional-mean regression dominates conditional generation for recall@K**. The
+   diversity argument must find a metric it moves (slate coverage, exploration) — recall@K is not it.
