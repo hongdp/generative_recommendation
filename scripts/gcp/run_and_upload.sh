@@ -19,7 +19,14 @@ salvage() {
     pip freeze > "$HOME/pip_freeze.txt" 2>&1 || true
     gcloud storage cp "$LOG" "$HOME/TRAIN_EXIT" "$HOME/gpu_info.txt" "$HOME/pip_freeze.txt" "$BUCKET/" || true
     gcloud storage rsync -r "$REPO_DIR/experiments" "$BUCKET/experiments" || true
-    if [[ "$NOSHUTDOWN" != "1" ]]; then sudo shutdown -h now; fi
+    if [[ "$NOSHUTDOWN" != "1" ]]; then
+        # Self-delete (needs compute-rw scope): frees the name AND the disk;
+        # guest shutdown alone leaves a TERMINATED husk holding both.
+        MD="http://metadata.google.internal/computeMetadata/v1/instance"
+        Z=$(curl -s -H "Metadata-Flavor: Google" "$MD/zone" | awk -F/ '{print $NF}')
+        N=$(curl -s -H "Metadata-Flavor: Google" "$MD/name")
+        gcloud compute instances delete "$N" --zone="$Z" --quiet || sudo shutdown -h now
+    fi
 }
 trap salvage EXIT
 

@@ -33,7 +33,7 @@ for ZONE in $ZONES; do
         --image-family="$IMAGE_FAMILY" --image-project="$IMAGE_PROJECT" \
         --boot-disk-size="${BOOT_DISK_GB}GB" --boot-disk-type=pd-balanced \
         --maintenance-policy=TERMINATE \
-        --scopes=storage-rw,logging-write,monitoring-write \
+        --scopes=storage-rw,logging-write,monitoring-write,compute-rw \
         --metadata=install-nvidia-driver=True \
         "${EXTRA[@]}"; then
         echo "$VM_NAME $ZONE" > .gcp_vm_current

@@ -62,6 +62,10 @@ def main():
                          "(per-dim residual sd) instead of global N(0,I). The generator then only "
                          "learns the local multimodal spread; W carries the global geometry.")
     ap.add_argument("--anchor_fit_n", type=int, default=200_000)
+    ap.add_argument("--head", type=str, default="flow", choices=["flow", "regress"],
+                    help="regress = direct MSE regression h -> x1 (the mean-seeking baseline from the "
+                         "flow-vs-regression question). Implemented as the SAME FlowHead applied with "
+                         "z_t=0, t=0 predicting x1 directly — identical parameter count, no noise/time.")
     ap.add_argument("--target_table", type=str, default="",
                     help="Optional external target/retrieval space (item2vec msgpack with {'table': [N+1, d]}). "
                          "Conditioning h still comes from the stage-1 checkpoint; only the space the flow "
@@ -174,6 +178,9 @@ def main():
         xt = (1.0 - t[:, None]) * x0 + t[:, None] * x1n
 
         def loss_fn(p):
+            if args.head == "regress":
+                pred = flow.apply({"params": p}, h, jnp.zeros_like(x1n), jnp.zeros(x1n.shape[0]))
+                return jnp.mean(jnp.sum((pred - x1n) ** 2, axis=-1))
             v = flow.apply({"params": p}, h, xt, t)
             return jnp.mean(jnp.sum((v - (x1n - x0)) ** 2, axis=-1))
 
@@ -185,8 +192,14 @@ def main():
 
     @functools.partial(jax.jit, static_argnums=(3, 4))
     def generate(fparams, h, key, num_samples, num_steps):
-        """Euler-integrate num_samples noise seeds per user: [B, M, dim]."""
+        """Euler-integrate num_samples noise seeds per user: [B, M, dim].
+
+        regress head: deterministic single prediction, tiled (noise/steps unused).
+        """
         B = h.shape[0]
+        if args.head == "regress":
+            pred = flow.apply({"params": fparams}, h, jnp.zeros((B, dim)), jnp.zeros(B))
+            return jnp.repeat(pred[:, None, :], num_samples, axis=1)
         z = draw_x0(h, key, (B, num_samples, dim))
         hM = jnp.repeat(h[:, None, :], num_samples, axis=1).reshape(B * num_samples, dim)
         z = z.reshape(B * num_samples, dim)
