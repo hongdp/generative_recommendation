@@ -376,3 +376,24 @@ FlowHead h_user + M noise samples -> points -> metric-NN retrieval as stage-2). 
    pairs) vs random pairs; if equal, stop — fix stage-1 (item-item locality objective) or generate in SID
    space where locality is built in by quantization. Explains why industrial generative retrieval (TIGER,
    OneRec) quantizes rather than generating raw two-tower vectors.
+
+## Locality retrofit + flow retrieval redemption (2026-08-09/10) — the design law validated end-to-end
+
+Sequel to the flow postmortem. Archive: `experiments/kuairand_locality_stage1_20260809/`.
+
+1. **Locality cannot be retrofitted as an auxiliary loss**: cosine-scoring NaN'd (removes the dot loss's
+   norm brake); co-watch InfoNCE aux plateaued at adjacency gap 0.009 (λ=0.1) / 0.026 (λ=1.0) / 0.053
+   (item2vec-style 8-edge densification) — an equilibrium against the main loss that neither weight nor
+   edge density breaks. Bonus: the dense aux ran +18-55% val NDCG@10 ahead of the baseline at matched
+   epochs (standalone finding, needs seed replication).
+2. **Standalone item2vec space (locality as the primary objective)**: 20 min of training → adjΔ 0.138
+   (2.6× the aux ceiling), oracle top1-as-query 33K → 7.2K median (p25 = 1.6K).
+3. **Flow rerun on the item2vec space (A100, ~35 min, $1.2): recall@500 0.0057 → 0.0742 (M=1) / 0.0795
+   (M=16), median rank 53K → 9.9K.** Same generator code and conditioning; only the target space changed.
+   ~15× over random = the locality law confirmed: the space was the binding constraint, never the generator.
+4. M=16 beats M=1 for the first time (+7%) — multi-noise diversity converts to coverage once the space has
+   structure. 1-step Euler is optimal (straight paths; serving = 1 MLP pass + ANN per sample). flow-i2v =
+   65-74% of the dense baseline at recall@500, epoch-capped while still improving.
+5. Cloud migration shakeout (A100 flex-start, $2.02/h): DLVM lacks python3-venv; sha256 -c embeds relative
+   paths (run from repo root); guest shutdown leaves flex VMs TERMINATED holding their name — delete.
+   A100 batch-512 throughput: 11K tgt/s for the flow head (6.5× local 4080).
