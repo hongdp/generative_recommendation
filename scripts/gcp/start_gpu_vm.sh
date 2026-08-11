@@ -9,7 +9,7 @@ set -e
 PROJECT_ID=${PROJECT_ID:-"workstation-185016"}
 VM_NAME=${VM_NAME:-"kuairand-a100-$(date +%s)"}
 MACHINE_TYPE=${MACHINE_TYPE:-"a2-highgpu-1g"}       # 1x A100 40GB
-IMAGE_FAMILY=${IMAGE_FAMILY:-"common-cu124-ubuntu-2204-nvidia-550"}
+IMAGE_FAMILY=${IMAGE_FAMILY:-"common-cu129-ubuntu-2204-nvidia-580"}
 IMAGE_PROJECT="deeplearning-platform-release"
 BOOT_DISK_GB=${BOOT_DISK_GB:-200}
 MAX_RUN=${MAX_RUN:-"48h"}
