@@ -26,7 +26,10 @@ echo "=== data from GCS (hash-gated) ==="
 mkdir -p "$REPO_DIR/data/kuairand"
 cd "$REPO_DIR/data/kuairand"
 gcloud storage cp -n "$BUCKET/kuairand27k_top100000.npz" "$BUCKET/kuairand27k_top100000.meta.json" "$BUCKET/kuairand_cache.sha256" .
-sha256sum -c kuairand_cache.sha256
+# The checksum file embeds the repo-relative path — verify from the repo root,
+# or set -e kills the bootstrap here and the checkpoint pulls below never run
+# (exactly what stranded the first cloud flow launch).
+(cd "$REPO_DIR" && sha256sum -c data/kuairand/kuairand_cache.sha256)
 mkdir -p "$REPO_DIR/experiments/kuairand_readout_ab_20260801/item"
 gcloud storage cp -n "$BUCKET/ab_item_best_checkpoint.msgpack" "$REPO_DIR/experiments/kuairand_readout_ab_20260801/item/best_checkpoint.msgpack"
 gcloud storage cp -n "$BUCKET/ab_item_config.json" "$REPO_DIR/experiments/kuairand_readout_ab_20260801/item/config.json"
