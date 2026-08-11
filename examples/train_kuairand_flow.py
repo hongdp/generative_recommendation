@@ -62,6 +62,10 @@ def main():
                          "(per-dim residual sd) instead of global N(0,I). The generator then only "
                          "learns the local multimodal spread; W carries the global geometry.")
     ap.add_argument("--anchor_fit_n", type=int, default=200_000)
+    ap.add_argument("--target_table", type=str, default="",
+                    help="Optional external target/retrieval space (item2vec msgpack with {'table': [N+1, d]}). "
+                         "Conditioning h still comes from the stage-1 checkpoint; only the space the flow "
+                         "generates INTO (and retrieves from) changes. This is the locality-law test.")
     args = ap.parse_args()
 
     os.makedirs(args.exp_dir, exist_ok=True)
@@ -100,11 +104,16 @@ def main():
     with open(args.stage1, "rb") as f:
         frozen = flax.serialization.from_bytes(
             {"params": init_p, "epoch": 0, "best_val_ndcg": 0.0}, f.read())["params"]
-    out_table = np.asarray(frozen["out_embedding"])           # [num_items+1, dim]
+    if args.target_table:
+        raw = flax.serialization.msgpack_restore(open(args.target_table, "rb").read())
+        out_table = np.asarray(raw["table"])
+        print(f"external target space: {args.target_table} (adj_gap at save: {raw.get('adj_gap')})")
+    else:
+        out_table = np.asarray(frozen["out_embedding"])       # [num_items+1, dim]
     emb_mu = out_table[1:].mean(axis=0)
     emb_sd = out_table[1:].std(axis=0) + 1e-6
     table_n = jnp.asarray((out_table[1:] - emb_mu) / emb_sd)  # [num_items, dim], row i = item i+1
-    print(f"stage-1 loaded: table {out_table.shape}, per-dim sd mean {emb_sd.mean():.4f}")
+    print(f"target table {out_table.shape}, per-dim sd mean {emb_sd.mean():.4f}")
 
     @jax.jit
     def readout(x):
