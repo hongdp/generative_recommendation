@@ -5,10 +5,14 @@
 set -e
 RUN_NAME=$1; shift
 
-export VM_NAME="kuairand-a100-${RUN_NAME//_/-}-$(date +%s)"
+# GCE names must be lowercase RFC1035 (an uppercase run name silently fails
+# every zone; found the hard way behind a | tail).
+SAFE_NAME=$(echo "${RUN_NAME//_/-}" | tr '[:upper:]' '[:lower:]')
+export VM_NAME="ka-${SAFE_NAME}-$(date +%s)"
 bash "$(dirname "$0")/start_gpu_vm.sh"
-read VMN ZONE < .gcp_vm_current
-VM="$VMN.$ZONE.workstation-185016"
+# Zone via lookup, not the shared .gcp_vm_current file (parallel-launch race).
+ZONE=$(gcloud compute instances list --project=workstation-185016 --filter="name=$VM_NAME" --format="value(zone)" | awk -F/ '{print $NF}')
+VM="$VM_NAME.$ZONE.workstation-185016"
 
 echo "=== waiting for ssh on $VM ==="
 for i in $(seq 1 90); do ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$VM" true 2>/dev/null && break; sleep 20; done
