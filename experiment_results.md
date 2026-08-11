@@ -418,3 +418,11 @@ Two self-deleting A100 flex-start runs (parallel, ~$3 total). Archive: `experime
 4. Verdict for embedding-space generative retrieval at this scale: locality law stands, but once the
    space is fixed, **conditional-mean regression dominates conditional generation for recall@K**. The
    diversity argument must find a metric it moves (slate coverage, exploration) — recall@K is not it.
+
+### v4 endpoint verdict (2026-08-11): the co-watch aux raises the ENDPOINT, with the familiar rank trade
+
+v4 (dense co-watch aux, lambda=1.0, 8 edges x 1024 negs) converged: best val NDCG@10 0.008944 = **+16.7%
+over the baseline endpoint** (0.007661) — not just faster convergence. Test: NDCG@10 +3.0%, HR@20 +11.8%,
+MRR +4.4%, HR@1 **−9.9%** — the co-watch smoothing trades top-1 precision for depth, echoing the
+identity-shortcut gradient from the readout A/B. Single seed; replicate before recommending for
+production. (Aux's original locality goal remains failed — adjacency gap eroded to 0.041 by the end.)
