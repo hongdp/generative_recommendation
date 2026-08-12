@@ -311,3 +311,118 @@ Design doc §13.12-13.13. Rows: `begin_timelate*`, `begin_timebothz`, `GenRet E2
 | 2026-07-12 | Readout A/B arm=begin_timez (HSTU 4x256, sampled-softmax M=1024, untied) on STEAM | Local (GeForce RTX 4080) | 0.20686 | 0.17176 | 0.25279 | 0.18652 | 0.31294 | 0.20165 | 0.17643 | Best val NDCG@10=0.21420 (epoch 16); leak self/rand=0.471/-0.000, readout leak=0.043, table align=0.006 |
 | 2026-07-12 | Readout A/B arm=begin_timez (HSTU 4x256, sampled-softmax M=1024, untied) on STEAM | Local (GeForce RTX 4080) | 0.20875 | 0.17378 | 0.25480 | 0.18859 | 0.31548 | 0.20384 | 0.17862 | Best val NDCG@10=0.21535 (epoch 13); leak self/rand=0.477/0.001, readout leak=0.007, table align=0.005 |
 | 2026-07-12 | Readout A/B arm=begin_timez (HSTU 4x256, sampled-softmax M=1024, untied) on STEAM | Local (GeForce RTX 4080) | 0.20836 | 0.17268 | 0.25429 | 0.18746 | 0.31514 | 0.20278 | 0.17733 | Best val NDCG@10=0.21506 (epoch 15); leak self/rand=0.473/0.001, readout leak=0.044, table align=0.007 |
+
+## KuaiRand-27K production-regime readout A/B (2026-08-01/04)
+
+First run outside the academic regime: KuaiRand-27K short-video watch stream, production vocab policy
+(top-100K by last-train-day watch count), single-target GTS supervision (one readout per forward — the
+production setup), 5x512 HSTU (119M params), 18.5M train targets, 500K test targets, full-vocab ranking.
+Experiment archive: `experiments/kuairand_readout_ab_20260801/`.
+
+| Arm | best val NDCG@10 | test NDCG@10 | test HR@1 | test HR@10 | test HR@20 | final-layer leak |
+|:--|--:|--:|--:|--:|--:|--:|
+| A: item readout (production baseline) | 0.007661 (ep 22) | **0.004411** | 0.001962 | 0.007942 | 0.012976 | 0.212 |
+| B: dedicated `<begin>` readout | 0.007303 (ep 17) | 0.003297 | 0.000882 | 0.006868 | 0.012352 | 0.001 |
+| B vs A | −4.7% | **−25.3%** | **−55.0%** (14.3σ) | −13.5% | −4.8% | — |
+
+**Deep-K follow-up: the sign flips at K≈50** (same checkpoints, same 500K test set, `eval_kuairand_deepk.py`):
+
+| K | 1 | 5 | 10 | 20 | 50 | 100 | 200 | 500 | 1000 |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| begin vs item HR@K | −55.0% | −23.9% | −13.5% | −4.8% | **+4.3%** | +7.6% | +9.2% | +11.0% | **+11.7%** |
+| σ | −14.3 | −9.0 | −6.2 | −2.8 | +3.3 | +7.5 | +11.3 | +18.1 | +23.5 |
+
+NDCG@K crosses at K≈200. Median rank: item 9135 vs begin **7217** (−21%).
+
+1. **It is a precision/recall trade, not a loss.** The readout token loses the head of the list and wins
+   everything past ~50 candidates. Judging it on NDCG@10 alone reads one point off this curve. The +3-8%
+   gains seen on Beauty/Steam multi-position 4x256 and the −25% NDCG@10 here are the same curve sampled
+   at different places.
+2. **Mechanism = the identity shortcut.** The item arm's readout lives in the last watched video's own
+   residual stream and carries cos 0.21 with that video's input embedding — a same-author/topic/music
+   prior that is first-class for next-watch top-1. The `<begin>` token is structurally incapable of it
+   (leak 0.001 all run) and must route it through an attention hop.
+3. **Training ACCUMULATES self-content, it does not shed it**: item-arm final-layer leak rose monotonically
+   0.028 → 0.247 over 26 epochs. The leak profile [0.64, 0.69, 0.69, 0.67, 0.21] is deliberate retention
+   through the stack with a controlled release at the head — not an incomplete role handoff. This overturns
+   the earlier "dual-role interference" framing for this regime: here the dual role is a benefit.
+4. **Production implication depends on the model's role.** A top-1-scored end-to-end model keeps the item
+   readout (it already has the identity prior for free). A retrieval stage feeding a ranker is scored at
+   recall@100-500, where the readout token is worth +7.6% to +11.0% — a null result there may just mean the
+   offline metric was a small-K one that hides the win.
+5. Caveats: single seed per arm; checkpoints selected on a noisy 50K val (val gap −4.7% is inside noise,
+   the 500K test gap is not). Next: the reinject arm (`h_b + alpha * e_in(anchor)`) should recover most of
+   the gap — that is the direct test of the identity-shortcut mechanism.
+
+## Flow-matching generative retrieval on KuaiRand (2026-08-07/09) — negative, with a design law
+
+Two-stage design (frozen item-arm 5x512 + 100Kx512 sampled-softmax table as stage-1; conditional OT-CFM
+FlowHead h_user + M noise samples -> points -> metric-NN retrieval as stage-2). Archive:
+`experiments/kuairand_flow_retrieval_20260807/`. Same 500K test draw as the deep-K eval.
+
+| System | recall@100 | recall@500 | recall@1000 | median rank |
+|:--|--:|--:|--:|--:|
+| dense baseline (one dot query) | 0.0399 | 0.1144 | 0.1720 | 9,135 |
+| flow M=1 / M=16 (2-step Euler) | 0.0011 / 0.0009 | 0.0057 / 0.0045 | 0.0111 / 0.0088 | 53K / 63K |
+
+1. Flow retrieval ≈ random floor. NOT mode collapse (pairwise cos 0.15 — samples diverse): the failure is
+   uninformed conditioning — corr(gen rank, dense rank) = -0.10 from the same h.
+2. Oracle probes killed the architecture, not just the run: L2-rank of the target around dense-top1's OWN
+   embedding = 35K (random); **cos(last watch, target) 0.368 vs cos(last watch, random) 0.381 — the frozen
+   sampled-softmax table has zero item-item metric locality**, so ANY point-generator + metric-NN scheme is
+   bounded at chance on it. Anchored-flow arm 2 was implemented but its decision gate (W-anchor baseline)
+   correctly failed; not launched.
+3. **Design law**: before building a generator into a frozen embedding space, measure cos(consecutive-event
+   pairs) vs random pairs; if equal, stop — fix stage-1 (item-item locality objective) or generate in SID
+   space where locality is built in by quantization. Explains why industrial generative retrieval (TIGER,
+   OneRec) quantizes rather than generating raw two-tower vectors.
+
+## Locality retrofit + flow retrieval redemption (2026-08-09/10) — the design law validated end-to-end
+
+Sequel to the flow postmortem. Archive: `experiments/kuairand_locality_stage1_20260809/`.
+
+1. **Locality cannot be retrofitted as an auxiliary loss**: cosine-scoring NaN'd (removes the dot loss's
+   norm brake); co-watch InfoNCE aux plateaued at adjacency gap 0.009 (λ=0.1) / 0.026 (λ=1.0) / 0.053
+   (item2vec-style 8-edge densification) — an equilibrium against the main loss that neither weight nor
+   edge density breaks. Bonus: the dense aux ran +18-55% val NDCG@10 ahead of the baseline at matched
+   epochs (standalone finding, needs seed replication).
+2. **Standalone item2vec space (locality as the primary objective)**: 20 min of training → adjΔ 0.138
+   (2.6× the aux ceiling), oracle top1-as-query 33K → 7.2K median (p25 = 1.6K).
+3. **Flow rerun on the item2vec space (A100, ~35 min, $1.2): recall@500 0.0057 → 0.0742 (M=1) / 0.0795
+   (M=16), median rank 53K → 9.9K.** Same generator code and conditioning; only the target space changed.
+   ~15× over random = the locality law confirmed: the space was the binding constraint, never the generator.
+4. M=16 beats M=1 for the first time (+7%) — multi-noise diversity converts to coverage once the space has
+   structure. 1-step Euler is optimal (straight paths; serving = 1 MLP pass + ANN per sample). flow-i2v =
+   65-74% of the dense baseline at recall@500, epoch-capped while still improving.
+5. Cloud migration shakeout (A100 flex-start, $2.02/h): DLVM lacks python3-venv; sha256 -c embeds relative
+   paths (run from repo root); guest shutdown leaves flex VMs TERMINATED holding their name — delete.
+   A100 batch-512 throughput: 11K tgt/s for the flow head (6.5× local 4080).
+
+## Flow vs direct regression on the item2vec space (2026-08-11) — the generative premise refuted at this scale
+
+Two self-deleting A100 flex-start runs (parallel, ~$3 total). Archive: `experiments/kuairand_flow_vs_regress_20260810/`.
+
+| System | recall@500 | recall@1000 | median rank |
+|:--|--:|--:|--:|
+| **MSE regression head (1 fwd, deterministic)** | **0.1099** | **0.1713** | **7,147** |
+| flow M=16 (best generative cell) | 0.0792 | 0.1273 | 9,921 |
+| dense dot baseline | 0.1144 | 0.1720 | 9,135 |
+
+1. **Direct regression beats conditional flow by +39%/+35% (recall@500/1000)** and MATCHES the dense
+   baseline with a 3M-param head over the 20-minute item2vec space (median rank actually better).
+2. The mean-seeking fear (the motivating argument for generative heads) does not materialize under
+   metric-NN retrieval: the query point need not be a valid item, and the conditional mean is by
+   construction near-optimal for expected-distance retrieval. Flow's sampling noise costs more than
+   its diversity recovers (M=16 vs M=1 is +7%; regression's margin is +39%).
+3. Longer flow training changes nothing (40-epoch run converged at the same 0.079).
+4. Verdict for embedding-space generative retrieval at this scale: locality law stands, but once the
+   space is fixed, **conditional-mean regression dominates conditional generation for recall@K**. The
+   diversity argument must find a metric it moves (slate coverage, exploration) — recall@K is not it.
+
+### v4 endpoint verdict (2026-08-11): the co-watch aux raises the ENDPOINT, with the familiar rank trade
+
+v4 (dense co-watch aux, lambda=1.0, 8 edges x 1024 negs) converged: best val NDCG@10 0.008944 = **+16.7%
+over the baseline endpoint** (0.007661) — not just faster convergence. Test: NDCG@10 +3.0%, HR@20 +11.8%,
+MRR +4.4%, HR@1 **−9.9%** — the co-watch smoothing trades top-1 precision for depth, echoing the
+identity-shortcut gradient from the readout A/B. Single seed; replicate before recommending for
+production. (Aux's original locality goal remains failed — adjacency gap eroded to 0.041 by the end.)
